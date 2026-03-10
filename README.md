@@ -93,6 +93,7 @@
 
 > 注：AI 优先级 Gemini > Anthropic > OpenAI（含 AIHubmix），至少配置一个。`AIHUBMIX_KEY` 无需配置 `OPENAI_BASE_URL`，系统自动适配。图片识别需 Vision 能力模型。DeepSeek 思考模式（deepseek-reasoner、deepseek-r1、qwq、deepseek-chat）按模型名自动识别，无需额外配置。若第三方网关明确要求 `/v1/responses`，请将 `OPENAI_API_STYLE=responses`。若 AI 网关返回鉴权错误或异常 JSON，历史报告会显示明确错误摘要，而不是空白的 `KEY INSIGHTS`。
 > 本地运行时，如 `.env` 中显式配置了 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`OPENAI_API_STYLE`、`TAVILY_API_KEYS` 等项，这些值会优先于外部 shell 中同名环境变量，避免残留旧 Key 导致实际运行配置与 `.env` 不一致。
+> GitHub Actions `每日股票分析` workflow 也会透传 `OPENAI_API_STYLE`、`OPENAI_VISION_MODEL` 与 `AGENT_*` 配置，确保定时任务与本地 OpenAI 兼容网关 / Agent 模式保持一致。
 
 <details>
 <summary><b>通知渠道配置</b>（点击展开，至少配置一个）</summary>

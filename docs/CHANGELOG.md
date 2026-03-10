@@ -13,6 +13,10 @@
   - README 顶部导航增加 `start.md` 入口，便于本地快速启动
 
 ### 修复（#patch）
+- 🐛 **GitHub Actions 每日分析透传 OpenAI 协议风格与 Agent 配置**
+  - `daily_analysis.yml` 新增 `OPENAI_API_STYLE`、`OPENAI_VISION_MODEL`、`AGENT_MODE`、`AGENT_SKILLS`、`AGENT_MAX_STEPS`
+  - 修复 OpenAI 兼容 `responses` 网关在 GitHub Actions 中回退为 `chat_completions` 的问题
+  - 让定时任务与本地 `.env` 的 Agent / 网关配置保持一致，避免本地可跑、云端配置漂移
 - 🐛 **相关资讯自动隐藏乱码摘要**
   - 对少数搜索源返回的错误编码摘要增加乱码检测与清洗
   - 新抓取结果在搜索返回与入库前统一清洗，避免新浪/搜狐等页面摘要污染 AI 上下文
