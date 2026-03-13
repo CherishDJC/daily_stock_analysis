@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+### 配置（#patch）
+- 🔧 **默认本地 OpenAI 兼容示例切换为火山方舟 Ark**
+  - `.env` 本地运行配置改为 `OPENAI_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3`
+  - OpenAI 兼容模型改为 `ark-code-latest`，协议风格固定为 `chat_completions`
+  - `.env.example` 与 `README.md` 新增 Ark 配置说明，并注明 `openai-completions` 对应本项目的 `chat_completions`
+- 🔧 **GitHub Actions 每日定时分析切换为火山方舟 Ark**
+  - `.github/workflows/daily_analysis.yml` 默认 `OPENAI_BASE_URL` 改为 `https://ark.cn-beijing.volces.com/api/coding/v3`
+  - 定时分析默认模型改为 `ark-code-latest`，协议风格固定为 `chat_completions`
+  - 为避免 Provider 优先级导致实际仍走 Gemini / Anthropic / AIHubMix，workflow 中显式禁用这些上层 Provider
+
 ### 文档（#skip）
 - 📝 **新增 `start.md` 启动文档**
   - 补充本地安装、最小 `.env` 配置、Web/API 启动、命令行分析、回测、停止服务和常见告警说明
