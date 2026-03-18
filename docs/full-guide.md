@@ -58,9 +58,11 @@ daily_stock_analysis/
 | Secret 名称 | 说明 | 必填 |
 |------------|------|:----:|
 | `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) 获取免费 Key | ✅* |
-| `OPENAI_API_KEY` | OpenAI 兼容 API Key（支持 DeepSeek、通义千问等） | 可选 |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址（如 `https://api.deepseek.com/v1`） | 可选 |
-| `OPENAI_MODEL` | 模型名称（如 `gemini-3.1-pro-preview`、`deepseek-chat`、`gpt-5.2`） | 可选 |
+| `OPENAI_API_KEY` | OpenAI 兼容 API Key | 可选 |
+| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址（默认示例：`https://ai.novacode.top/v1`） | 可选 |
+| `OPENAI_MODEL` | 模型名称（默认示例：`gpt-5.4`；也可填写 `deepseek-chat` 等） | 可选 |
+| `OPENAI_VISION_MODEL` | 图片识别模型名称（默认示例：`gpt-5.4`） | 可选 |
+| `OPENAI_API_STYLE` | OpenAI 兼容接口风格（默认 `responses`） | 可选 |
 
 > *注：`GEMINI_API_KEY` 和 `OPENAI_API_KEY` 至少配置一个
 
@@ -115,7 +117,7 @@ daily_stock_analysis/
 
 如果你想快速开始，最少需要配置以下项：
 
-1. **AI 模型**：`AIHUBMIX_KEY`（[AIHubmix](https://aihubmix.com/?aff=CfMq)，一 Key 多模型）、`GEMINI_API_KEY` 或 `OPENAI_API_KEY`
+1. **AI 模型**：`AIHUBMIX_KEY`（[AIHubmix](https://aihubmix.com/?aff=CfMq)，一 Key 多模型）、`GEMINI_API_KEY` 或 `OPENAI_API_KEY`（如使用 OpenAI 兼容网关，建议同时配置 `OPENAI_BASE_URL=https://ai.novacode.top/v1`、`OPENAI_MODEL=gpt-5.4`、`OPENAI_VISION_MODEL=gpt-5.4`、`OPENAI_API_STYLE=responses`）
 2. **通知渠道**：至少配置一个，如 `WECHAT_WEBHOOK_URL` 或 `EMAIL_SENDER` + `EMAIL_PASSWORD`
 3. **股票列表**：`STOCK_LIST`（必填）
 4. **搜索 API**：`TAVILY_API_KEYS`（强烈推荐，用于新闻搜索）
@@ -153,14 +155,16 @@ daily_stock_analysis/
 | `GEMINI_MODEL` | 主模型名称 | `gemini-3-flash-preview` | 否 |
 | `GEMINI_MODEL_FALLBACK` | 备选模型 | `gemini-2.5-flash` | 否 |
 | `OPENAI_API_KEY` | OpenAI 兼容 API Key | - | 可选 |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | - | 可选 |
-| `OPENAI_MODEL` | OpenAI 模型名称（AIHubmix 用户可填如 `gemini-3.1-pro-preview`、`gemini-3-flash-preview`、`gpt-5.2`） | `gpt-5.2` | 可选 |
+| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | `https://ai.novacode.top/v1` | 可选 |
+| `OPENAI_MODEL` | OpenAI 模型名称（默认示例：`gpt-5.4`；也可填写 `deepseek-chat`、`gemini/gemini-3-pro-preview` 等） | `gpt-5.4` | 可选 |
+| `OPENAI_VISION_MODEL` | OpenAI 图片识别模型名称 | `gpt-5.4` | 可选 |
+| `OPENAI_API_STYLE` | OpenAI 兼容接口风格（`responses` / `chat_completions`） | `responses` | 可选 |
 | `ANTHROPIC_API_KEY` | Anthropic Claude API Key | - | 可选 |
 | `ANTHROPIC_MODEL` | Claude 模型名称 | `claude-3-5-sonnet-20241022` | 可选 |
 | `ANTHROPIC_TEMPERATURE` | Claude 温度参数（0.0-1.0） | `0.7` | 可选 |
 | `ANTHROPIC_MAX_TOKENS` | Claude 响应最大 token 数 | `8192` | 可选 |
 
-> *注：`AIHUBMIX_KEY`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY` 和 `OPENAI_API_KEY` 至少配置一个。`AIHUBMIX_KEY` 无需配置 `OPENAI_BASE_URL`，系统自动适配。
+> *注：`AIHUBMIX_KEY`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY` 和 `OPENAI_API_KEY` 至少配置一个。`AIHUBMIX_KEY` 无需配置 `OPENAI_BASE_URL`，系统自动适配；使用 OpenAI 兼容网关时，当前项目默认示例为 `OPENAI_BASE_URL=https://ai.novacode.top/v1`、`OPENAI_MODEL=gpt-5.4`、`OPENAI_VISION_MODEL=gpt-5.4`、`OPENAI_API_STYLE=responses`。
 
 ### 通知渠道配置
 
@@ -608,10 +612,13 @@ GEMINI_MODEL=gemini-3-flash-preview
 
 # OpenAI 兼容（备选）
 OPENAI_API_KEY=xxx
-OPENAI_BASE_URL=https://api.deepseek.com/v1
-OPENAI_MODEL=deepseek-chat
-# 思考模式：deepseek-reasoner、deepseek-r1、qwq 等自动识别；deepseek-chat 系统按模型名自动启用
+OPENAI_BASE_URL=https://ai.novacode.top/v1
+OPENAI_MODEL=gpt-5.4
+OPENAI_VISION_MODEL=gpt-5.4
+OPENAI_API_STYLE=responses
 ```
+
+> 默认 provider 优先级仍为：**Gemini > Anthropic > OpenAI 兼容**。本次仅统一 OpenAI 兼容默认值与示例，不移除 Gemini / Anthropic 路径。
 
 ### LiteLLM Proxy（统一多模型网关）
 

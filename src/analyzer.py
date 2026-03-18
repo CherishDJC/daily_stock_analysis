@@ -894,7 +894,7 @@ class GeminiAnalyzer:
     ) -> str:
         """调用 OpenAI Responses API。"""
         config = get_config()
-        model_name = self._current_model_name or config.openai_model or "gpt-4o-mini"
+        model_name = self._current_model_name or config.openai_model or "gpt-5.4"
         max_output_tokens = generation_config.get('max_output_tokens', 8192)
 
         request_kwargs = {

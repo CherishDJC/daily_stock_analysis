@@ -203,7 +203,7 @@ def _call_openai(image_b64: str, mime_type: str) -> str:
         client_kwargs["default_headers"] = {"APP-Code": "GPIJ3886"}
     client = OpenAI(**client_kwargs)
     # 使用 Vision 专用模型（若配置），否则用 openai_model（部分第三方模型不支持图像）
-    model = (cfg.openai_vision_model or cfg.openai_model or "gpt-4o-mini").strip() or "gpt-4o-mini"
+    model = (cfg.openai_vision_model or cfg.openai_model or "gpt-5.4").strip() or "gpt-5.4"
     data_url = f"data:{mime_type};base64,{image_b64}"
     api_style = normalize_openai_api_style(getattr(cfg, "openai_api_style", None))
 

@@ -6,6 +6,12 @@ import json
 import os
 import subprocess
 import traceback
+from typing import Any, List
+
+
+DEFAULT_OPENAI_BASE_URL = 'https://ai.novacode.top/v1'
+DEFAULT_OPENAI_MODEL = 'gpt-5.4'
+DEFAULT_OPENAI_API_STYLE = 'responses'
 
 
 MAX_DIFF_LENGTH = 18000
@@ -125,6 +131,24 @@ def build_prompt(diff_content, files, truncated, pr_title, pr_body):
 """
 
 
+def normalize_openai_api_style(style: str | None) -> str:
+    value = (style or '').strip().lower().replace('-', '_')
+    if value in {'responses', 'openai_responses', 'openai_response'}:
+        return 'responses'
+    return 'chat_completions'
+
+
+def extract_text_from_responses(response: Any) -> str:
+    texts: List[str] = []
+    for item in getattr(response, 'output', []) or []:
+        if getattr(item, 'type', None) != 'message':
+            continue
+        for part in getattr(item, 'content', []) or []:
+            if getattr(part, 'type', None) == 'output_text' and getattr(part, 'text', None):
+                texts.append(part.text)
+    return ''.join(texts).strip()
+
+
 def review_with_gemini(prompt):
     """Run review with Gemini API."""
     api_key = os.environ.get('GEMINI_API_KEY')
@@ -158,8 +182,9 @@ def review_with_gemini(prompt):
 def review_with_openai(prompt):
     """Run review with OpenAI-compatible API as fallback."""
     api_key = os.environ.get('OPENAI_API_KEY')
-    base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')
-    model = os.environ.get('OPENAI_MODEL', 'gpt-4o-mini')
+    base_url = os.environ.get('OPENAI_BASE_URL') or DEFAULT_OPENAI_BASE_URL
+    model = os.environ.get('OPENAI_MODEL') or DEFAULT_OPENAI_MODEL
+    api_style = normalize_openai_api_style(os.environ.get('OPENAI_API_STYLE') or DEFAULT_OPENAI_API_STYLE)
 
     if not api_key:
         print("❌ OpenAI API Key 未配置（检查 GitHub Secrets: OPENAI_API_KEY）")
@@ -167,17 +192,33 @@ def review_with_openai(prompt):
 
     print(f"🌐 Base URL: {base_url}")
     print(f"🤖 使用模型: {model}")
+    print(f"🧩 API Style: {api_style}")
 
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key, base_url=base_url)
+        if api_style == 'responses':
+            response = client.responses.create(
+                model=model,
+                input=prompt,
+                max_output_tokens=2000,
+                temperature=0.3,
+            )
+            if getattr(response, 'error', None):
+                raise ValueError(str(response.error))
+            text = extract_text_from_responses(response)
+            if not text:
+                raise ValueError('OpenAI Responses returned empty response')
+            print(f"✅ OpenAI Responses 接口 ({model}) 审查成功")
+            return text
+
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=2000,
-            temperature=0.3
+            temperature=0.3,
         )
-        print(f"✅ OpenAI 兼容接口 ({model}) 审查成功")
+        print(f"✅ OpenAI Chat Completions 接口 ({model}) 审查成功")
         return response.choices[0].message.content
     except ImportError as e:
         print(f"❌ OpenAI 依赖未安装: {e}")

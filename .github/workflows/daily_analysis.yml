@@ -56,7 +56,7 @@ jobs:
           # ==========================================
           # AI 配置
           # ==========================================
-          # 定时任务固定走火山方舟 Ark（OpenAI-compatible）链路。
+          # 定时任务默认走 OpenAI-compatible Responses 网关。
           # 注意：项目 Provider 优先级为 Gemini > Anthropic > OpenAI-compatible，
           # 因此这里显式清空更高优先级 Provider，避免定时任务误走到其他模型。
           GEMINI_API_KEY: ''
@@ -67,13 +67,13 @@ jobs:
           # AIHubMix（优先于 OPENAI_API_KEY，自动适配 base_url，推荐国内用户）
           AIHUBMIX_KEY: ''
 
-          # OpenAI 兼容 API（火山方舟 Ark）
-          # 请将 GitHub Secret OPENAI_API_KEY 配置为 Ark API Key。
+          # OpenAI 兼容 API（默认 Responses 网关）
+          # 请将 GitHub Secret OPENAI_API_KEY 配置为对应网关的 API Key。
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL || 'https://ark.cn-beijing.volces.com/api/coding/v3' }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL || 'ark-code-latest' }}
-          OPENAI_VISION_MODEL: ${{ vars.OPENAI_VISION_MODEL || secrets.OPENAI_VISION_MODEL || 'ark-code-latest' }}
-          OPENAI_API_STYLE: ${{ vars.OPENAI_API_STYLE || secrets.OPENAI_API_STYLE || 'chat_completions' }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL || 'https://ai.novacode.top/v1' }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL || 'gpt-5.4' }}
+          OPENAI_VISION_MODEL: ${{ vars.OPENAI_VISION_MODEL || secrets.OPENAI_VISION_MODEL || 'gpt-5.4' }}
+          OPENAI_API_STYLE: ${{ vars.OPENAI_API_STYLE || secrets.OPENAI_API_STYLE || 'responses' }}
 
           # Anthropic / Claude
           ANTHROPIC_API_KEY: ''

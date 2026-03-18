@@ -10,7 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
-SCHEMA_VERSION = "2026-02-09"
+SCHEMA_VERSION = "2026-03-18"
 
 _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
     {
@@ -269,7 +269,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "is_sensitive": False,
         "is_required": False,
         "is_editable": True,
-        "default_value": None,
+        "default_value": "https://ai.novacode.top/v1",
         "options": [],
         "validation": {},
         "display_order": 50,
@@ -283,7 +283,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "is_sensitive": False,
         "is_required": False,
         "is_editable": True,
-        "default_value": "gpt-4o-mini",
+        "default_value": "gpt-5.4",
         "options": [],
         "validation": {},
         "display_order": 61,
@@ -297,7 +297,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "is_sensitive": False,
         "is_required": False,
         "is_editable": True,
-        "default_value": "chat_completions",
+        "default_value": "responses",
         "options": ["chat_completions", "responses"],
         "validation": {"enum": ["chat_completions", "responses"]},
         "display_order": 60,
@@ -311,7 +311,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "is_sensitive": False,
         "is_required": False,
         "is_editable": True,
-        "default_value": None,
+        "default_value": "gpt-5.4",
         "options": [],
         "validation": {},
         "display_order": 62,

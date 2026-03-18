@@ -231,8 +231,9 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
           GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || 'https://ai.novacode.top/v1' }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.4' }}
+          OPENAI_API_STYLE: ${{ vars.OPENAI_API_STYLE || 'responses' }}
           AI_REVIEW_STRICT: ${{ vars.AI_REVIEW_STRICT || 'false' }}
         run: python ../main-scripts/.github/scripts/ai_review.py
       

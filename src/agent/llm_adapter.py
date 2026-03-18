@@ -425,7 +425,7 @@ class LLMToolAdapter:
                     "content": msg["content"],
                 })
 
-        model_name = config.openai_model or "gpt-4o-mini"
+        model_name = config.openai_model or "gpt-5.4"
         call_kwargs = {
             "model": model_name,
             "messages": openai_messages,
@@ -502,7 +502,7 @@ class LLMToolAdapter:
     ) -> LLMResponse:
         """Call OpenAI-compatible Responses API with function-calling support."""
         config = self._config
-        model_name = config.openai_model or "gpt-4o-mini"
+        model_name = config.openai_model or "gpt-5.4"
 
         instructions = None
         non_system_messages: List[Dict[str, Any]] = []

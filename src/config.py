@@ -109,11 +109,11 @@ class Config:
 
     # OpenAI 兼容 API（备选，当 Gemini/Anthropic 不可用时使用）
     openai_api_key: Optional[str] = None
-    openai_base_url: Optional[str] = None  # 如: https://api.openai.com/v1
-    openai_model: str = "gpt-4o-mini"  # OpenAI 兼容模型名称
+    openai_base_url: Optional[str] = "https://ai.novacode.top/v1"  # 如: https://ai.novacode.top/v1
+    openai_model: str = "gpt-5.4"  # OpenAI 兼容模型名称
     openai_vision_model: Optional[str] = None  # Vision 专用模型（可选，不配置则用 openai_model；部分模型如 DeepSeek 不支持图像）
     openai_temperature: float = 0.7  # OpenAI 温度参数（0.0-2.0，默认0.7）
-    openai_api_style: str = "chat_completions"  # chat_completions | responses
+    openai_api_style: str = "responses"  # chat_completions | responses
 
     # === 搜索引擎配置（支持多 Key 负载均衡）===
     bocha_api_keys: List[str] = field(default_factory=list)  # Bocha API Keys
@@ -445,13 +445,15 @@ class Config:
             or read_preferred_env('OPENAI_API_KEY', env_file_values)
             or None,
             openai_base_url=read_preferred_env('OPENAI_BASE_URL', env_file_values) or (
-                'https://aihubmix.com/v1' if read_preferred_env('AIHUBMIX_KEY', env_file_values) else None
+                'https://aihubmix.com/v1'
+                if read_preferred_env('AIHUBMIX_KEY', env_file_values)
+                else 'https://ai.novacode.top/v1'
             ),  # noqa: E501
-            openai_model=read_preferred_env('OPENAI_MODEL', env_file_values, 'gpt-4o-mini') or 'gpt-4o-mini',
+            openai_model=read_preferred_env('OPENAI_MODEL', env_file_values, 'gpt-5.4') or 'gpt-5.4',
             openai_vision_model=read_preferred_env('OPENAI_VISION_MODEL', env_file_values) or None,
             openai_temperature=float(os.getenv('OPENAI_TEMPERATURE', '0.7')),
             openai_api_style=normalize_openai_api_style(
-                read_preferred_env('OPENAI_API_STYLE', env_file_values, 'chat_completions')
+                read_preferred_env('OPENAI_API_STYLE', env_file_values, 'responses')
             ),
             bocha_api_keys=bocha_api_keys,
             tavily_api_keys=tavily_api_keys,

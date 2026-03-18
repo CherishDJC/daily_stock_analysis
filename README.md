@@ -86,15 +86,16 @@
 | `ANTHROPIC_API_KEY` | [Anthropic Claude](https://console.anthropic.com/) API Key | 可选 |
 | `ANTHROPIC_MODEL` | Claude 模型（如 `claude-3-5-sonnet-20241022`） | 可选 |
 | `OPENAI_API_KEY` | OpenAI 兼容 API Key（支持 DeepSeek、通义千问等） | 可选 |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址（如 `https://api.deepseek.com/v1`、`https://ark.cn-beijing.volces.com/api/coding/v3`） | 可选 |
-| `OPENAI_MODEL` | 模型名称（如 `gemini-3.1-pro-preview`、`gemini-3-flash-preview`、`gpt-5.2`、`ark-code-latest`） | 可选 |
+| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址（如 `https://api.deepseek.com/v1`、`https://ai.novacode.top/v1`） | 可选 |
+| `OPENAI_MODEL` | 模型名称（如 `gemini-3.1-pro-preview`、`gemini-3-flash-preview`、`gpt-5.4`） | 可选 |
 | `OPENAI_API_STYLE` | OpenAI 兼容协议类型：`chat_completions` 或 `responses` | 可选 |
 | `OPENAI_VISION_MODEL` | 图片识别专用模型（部分第三方模型不支持图像；不填则用 `OPENAI_MODEL`） | 可选 |
 
 > 注：AI 优先级 Gemini > Anthropic > OpenAI（含 AIHubmix），至少配置一个。`AIHUBMIX_KEY` 无需配置 `OPENAI_BASE_URL`，系统自动适配。图片识别需 Vision 能力模型。DeepSeek 思考模式（deepseek-reasoner、deepseek-r1、qwq、deepseek-chat）按模型名自动识别，无需额外配置。若第三方网关明确要求 `/v1/responses`，请将 `OPENAI_API_STYLE=responses`。若 AI 网关返回鉴权错误或异常 JSON，历史报告会显示明确错误摘要，而不是空白的 `KEY INSIGHTS`。
-> 火山方舟这类标注为 `openai-completions` 的网关，在本项目中请配置为 `OPENAI_API_STYLE=chat_completions`；若同时使用图片识别，请单独指定支持视觉的 `OPENAI_VISION_MODEL`。
+> 当前项目已兼容 `responses` 风格：分析主链路走 `src/analyzer.py`，图片识别走 `src/services/image_stock_extractor.py`，Agent 工具调用走 `src/agent/llm_adapter.py`，都会根据 `OPENAI_API_STYLE` 自动切换。
+> 对于火山方舟这类标注为 `openai-completions` 的网关，在本项目中请配置为 `OPENAI_API_STYLE=chat_completions`；若同时使用图片识别，请单独指定支持视觉的 `OPENAI_VISION_MODEL`。
 > 本地运行时，如 `.env` 中显式配置了 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`OPENAI_API_STYLE`、`TAVILY_API_KEYS` 等项，这些值会优先于外部 shell 中同名环境变量，避免残留旧 Key 导致实际运行配置与 `.env` 不一致。
-> GitHub Actions `每日股票分析` workflow 默认也已切到火山方舟 Ark（`OPENAI_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3`，`OPENAI_MODEL=ark-code-latest`）；请把仓库 Secret `OPENAI_API_KEY` 更新为 Ark API Key。为避免 Provider 优先级覆盖，该 workflow 会显式禁用 Gemini、Anthropic 和 AIHubMix。
+> GitHub Actions `每日股票分析` workflow 默认已切到 OpenAI-compatible Responses 网关（`OPENAI_BASE_URL=https://ai.novacode.top/v1`，`OPENAI_MODEL=gpt-5.4`，`OPENAI_API_STYLE=responses`）；请把仓库 Secret `OPENAI_API_KEY` 更新为对应网关的 API Key。为避免 Provider 优先级覆盖，该 workflow 会显式禁用 Gemini、Anthropic 和 AIHubMix。
 
 <details>
 <summary><b>通知渠道配置</b>（点击展开，至少配置一个）</summary>
