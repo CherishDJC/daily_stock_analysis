@@ -1,6 +1,7 @@
 import type React from 'react';
 import {BrowserRouter as Router, Routes, Route, NavLink, useLocation, Navigate} from 'react-router-dom';
 import HomePage from './pages/HomePage';
+import MonitorPage from './pages/MonitorPage';
 import BacktestPage from './pages/BacktestPage';
 import SettingsPage from './pages/SettingsPage';
 import LoginPage from './pages/LoginPage';
@@ -39,6 +40,13 @@ const ChatIcon: React.FC<{ active?: boolean }> = ({active}) => (
     </svg>
 );
 
+const MonitorIcon: React.FC<{ active?: boolean }> = ({active}) => (
+    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={active ? 2 : 1.5}
+              d="M3 13.5h3l2-6 4 11 2-7h7"/>
+    </svg>
+);
+
 const LogoutIcon: React.FC = () => (
     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
@@ -59,6 +67,12 @@ const NAV_ITEMS: DockItem[] = [
         label: '首页',
         to: '/',
         icon: HomeIcon,
+    },
+    {
+        key: 'monitor',
+        label: '看盘',
+        to: '/monitor',
+        icon: MonitorIcon,
     },
     {
         key: 'chat',
@@ -174,6 +188,7 @@ const AppContent: React.FC = () => {
             <main className="flex-1 dock-safe-area">
                 <Routes>
                     <Route path="/" element={<HomePage/>}/>
+                    <Route path="/monitor" element={<MonitorPage/>}/>
                     <Route path="/chat" element={<ChatPage/>}/>
                     <Route path="/backtest" element={<BacktestPage/>}/>
                     <Route path="/settings" element={<SettingsPage/>}/>

@@ -222,11 +222,12 @@ get_analysis_context_tool = ToolDefinition(
 
 def _handle_get_stock_info(stock_code: str) -> dict:
     """Get stock fundamental information including industry, financials, and valuation."""
-    # Try EfinanceFetcher.get_base_info first (most complete)
+    manager = _get_fetcher_manager()
+
+    # Prefer DataFetcherManager so Tushare can take priority for overlapping
+    # A-share metadata while other fetchers remain available as fallback.
     try:
-        from data_provider.efinance_fetcher import EfinanceFetcher
-        fetcher = EfinanceFetcher()
-        info = fetcher.get_base_info(stock_code)
+        info = manager.get_base_info(stock_code)
         if info:
             # Sanitise: convert non-serialisable types and remove NaN
             import math
@@ -244,7 +245,7 @@ def _handle_get_stock_info(stock_code: str) -> dict:
 
             # Also try to get board/sector membership
             try:
-                board_df = fetcher.get_belong_board(stock_code)
+                board_df = manager.get_belong_board(stock_code)
                 if board_df is not None and not board_df.empty:
                     # Typically columns: 板块名称, 板块代码, 涨跌幅, …
                     boards = board_df.to_dict(orient="records")
@@ -260,10 +261,9 @@ def _handle_get_stock_info(stock_code: str) -> dict:
 
             return clean
     except Exception as e:
-        logger.warning(f"get_stock_info via EfinanceFetcher failed for {stock_code}: {e}")
+        logger.warning(f"get_stock_info via DataFetcherManager failed for {stock_code}: {e}")
 
     # Fallback: derive from realtime quote (valuation metrics only)
-    manager = _get_fetcher_manager()
     quote = manager.get_realtime_quote(stock_code)
     if quote:
         return {

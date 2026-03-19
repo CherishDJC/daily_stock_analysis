@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### 新增（#minor）
+- 📺 **A 股实时看盘模块**
+  - 新增 `GET /api/v1/market/overview` 聚合接口，统一返回自选股实时行情、指数、市场宽度和板块排行
+  - Web 端新增 `/monitor` 页面和 Dock 导航入口，支持盘中自动刷新、手动强刷、搜索和本地排序
+  - 首版仅覆盖 A 股盘中场景，复用现有 `STOCK_LIST`，若混入港股/美股代码会在页面显式提示已跳过
+  - 无新增环境变量，不引入图表库或 WebSocket 行情流
+
 ### 配置（#patch）
 - 🔧 **默认本地 OpenAI 兼容示例切换为火山方舟 Ark**
   - `.env` 本地运行配置改为 `OPENAI_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3`
@@ -23,6 +30,47 @@
   - README 顶部导航增加 `start.md` 入口，便于本地快速启动
 
 ### 修复（#patch）
+- 🐛 **优化 `/chat` 的上游 504 错误提示**
+  - 当 OpenAI 兼容网关返回 HTML/Cloudflare `504 Gateway time-out` 时，后端会统一转换成可读错误信息，而不是把整段 HTML 原样透传到前端
+- 🐛 **实时看盘首屏改为分段加载，避免被慢摘要接口阻塞**
+  - `/api/v1/market/overview` 新增按区块加载参数，Web 端先拉 watchlist，再后台补指数、市场宽度和板块排行
+  - 看盘页面进入后立即渲染框架与占位信息，不再等待完整 summary 返回后才显示
+  - A 股看盘颜色统一调整为涨红跌绿，指数卡片、板块列表和自选股表格保持一致
+- 🐛 **看盘页支持点击股票查看日 K**
+  - Web 看盘表新增点击交互，点击任一股票即可打开日 K 抽屉
+  - 复用现有 `/api/v1/stocks/{code}/history` 接口，无新增后端路由
+  - 抽屉支持近 30/60/120 天日线切换，并展示最近 8 根 K 线明细
+  - 日 K 抽屉新增 `AI分析` 按钮，可直接跳转到首页分析页并自动预填当前股票代码
+- 🐛 **板块冷热支持点击行业下钻相关股并继续查看日 K**
+  - 新增 `GET /api/v1/market/sectors/{sector_name}/constituents`，按行业名称返回最多 10 条相关股明细
+  - 看盘页点击领涨/领跌行业后，会打开相关股抽屉，展示实时价格、涨跌幅、量比、换手率和成交额
+  - 继续点击抽屉中的相关股，可直接切换到该股票的日 K 抽屉；关闭日 K 后会恢复到原行业抽屉，不再重新加载
+  - 相关股优先直连新浪行业成分股接口，不再依赖可能缺少 `industry` 字段的旧 `stock_list` 缓存
+- 🐛 **日 K 图支持全屏查看与悬停详情**
+  - 日 K 抽屉新增全屏查看入口，图表可扩展至全屏显示
+  - 全屏层聚焦整屏图表本身，仅保留退出全屏入口，不再额外展示顶部股票信息和统计卡片
+  - 鼠标悬停在 K 柱上时展示日期、收盘价和相对前一日涨跌幅
+  - `ESC` 在全屏状态下优先退出全屏，不会直接关闭整个日 K 抽屉
+- 🐛 **历史日 K 改为 DB 优先，减少重复全量回源**
+  - `/api/v1/stocks/{code}/history` 优先复用本地 `stock_daily` 中昨天及更早的稳定日线
+  - 当本地历史已齐备时，只补拉最近小窗口以更新当天 K 线，不再每次重拉完整 30/60/120 天
+  - 三方接口异常时自动回退到本地缓存历史，避免日 K 抽屉整体空白
+- 🐛 **市场宽度与板块冷热改用当前可用的数据源回退**
+  - `market_stats` 策略层改为优先走 Tushare `daily(trade_date=...)`，不再依赖无权限的 `trade_cal`
+  - `sector_rankings` 改为优先使用 AkShare `stock_sector_spot(indicator='行业')`，规避当前环境下失效的东财板块接口
+  - 修复看盘页 summary 数据长期为空的问题，市场宽度和板块冷热可恢复正常展示
+- 🐛 **低频参考数据落库缓存，减少重复请求三方接口**
+  - 新增 `reference_data_cache` 表和仓库，按 `namespace + key + expires_at` 持久化 JSON 缓存
+  - `stock_name / base_info / belong_board / index_basic` 改为优先命中 DB cache，再回源第三方接口
+  - 对 Tushare 这类高价值但限频严格的接口，重复进入页面或重复分析时可显著减少外部调用
+- 🐛 **实时行情主链路收敛为 AkShare Tencent/Sina，避免 Tushare/东财拖慢看盘接口**
+  - 默认 `REALTIME_SOURCE_PRIORITY` 调整为 `tencent,akshare_sina`
+  - 配置 `TUSHARE_TOKEN` 后不再自动把 `tushare` 注入到实时主链路
+  - 看盘页自选股实时行情只走轻量级主路径；`tushare / efinance / akshare_em` 保留作非关键 fallback
+- 🐛 **接入可用的 Tushare A 股基础接口，并优先于 AkShare 的重叠非实时能力**
+  - `TushareFetcher` 新增 A 股基础信息聚合，整合 `stock_basic / stock_company / namechange / dividend / top10_holders / top10_floatholders`
+  - 新增 `index_basic / new_share / limit_list_d` 封装，便于后续扩展到更多 A 股信息面能力
+  - `DataFetcherManager.get_base_info()` 与 Agent `get_stock_info` 工具改为统一走策略层，已配置 `TUSHARE_TOKEN` 时优先返回 Tushare 数据
 - 🐛 **GitHub Actions 每日分析透传 OpenAI 协议风格与 Agent 配置**
   - `daily_analysis.yml` 新增 `OPENAI_API_STYLE`、`OPENAI_VISION_MODEL`、`AGENT_MODE`、`AGENT_SKILLS`、`AGENT_MAX_STEPS`
   - 修复 OpenAI 兼容 `responses` 网关在 GitHub Actions 中回退为 `chat_completions` 的问题

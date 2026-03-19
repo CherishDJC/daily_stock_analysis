@@ -7,6 +7,7 @@ interface DrawerProps {
   title?: string;
   children: React.ReactNode;
   width?: string;
+  closeOnEscape?: boolean;
 }
 
 /**
@@ -18,15 +19,16 @@ export const Drawer: React.FC<DrawerProps> = ({
   title,
   children,
   width = 'max-w-2xl',
+  closeOnEscape = true,
 }) => {
   // ESC 键关闭
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (closeOnEscape && e.key === 'Escape') {
         onClose();
       }
     },
-    [onClose]
+    [closeOnEscape, onClose]
   );
 
   useEffect(() => {

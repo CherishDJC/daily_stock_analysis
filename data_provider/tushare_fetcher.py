@@ -16,9 +16,10 @@ TushareFetcher - 备用数据源 1 (Priority 2)
 
 import json as _json
 import logging
+import math
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Tuple, List, Dict, Any
 
 import pandas as pd
@@ -496,6 +497,242 @@ class TushareFetcher(BaseFetcher):
             logger.warning(f"Tushare 获取股票列表失败: {e}")
         
         return None
+
+    @staticmethod
+    def _clean_scalar(value: Any) -> Any:
+        """Convert pandas/numpy scalars into JSON-friendly Python values."""
+        if value is None:
+            return None
+        if isinstance(value, pd.Timestamp):
+            return value.strftime('%Y-%m-%d')
+        if hasattr(value, "item") and callable(getattr(value, "item")):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        return value
+
+    @classmethod
+    def _frame_to_records(cls, df: Optional[pd.DataFrame], limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Convert DataFrame rows into cleaned dictionaries."""
+        if df is None or df.empty:
+            return []
+
+        records: List[Dict[str, Any]] = []
+        sliced = df.head(limit) if limit is not None else df
+        for _, row in sliced.iterrows():
+            records.append({key: cls._clean_scalar(value) for key, value in row.items()})
+        return records
+
+    def get_name_changes(self, stock_code: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get historical stock name changes."""
+        if self._api is None:
+            return []
+
+        try:
+            self._check_rate_limit()
+            ts_code = self._convert_stock_code(stock_code)
+            df = self._api.namechange(
+                ts_code=ts_code,
+                fields='ts_code,name,start_date,end_date,ann_date,change_reason',
+            )
+            if df is None or df.empty:
+                return []
+            df = df.sort_values(['ann_date', 'start_date'], ascending=False, na_position='last')
+            return self._frame_to_records(df, limit=limit)
+        except Exception as e:
+            logger.warning(f"Tushare 获取股票曾用名失败 {stock_code}: {e}")
+            return []
+
+    def get_dividend(self, stock_code: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Get dividend history for an A-share stock."""
+        if self._api is None:
+            return []
+
+        try:
+            self._check_rate_limit()
+            ts_code = self._convert_stock_code(stock_code)
+            df = self._api.dividend(
+                ts_code=ts_code,
+                fields='ts_code,end_date,ann_date,div_proc,stk_div,stk_bo_rate,stk_co_rate,'
+                       'cash_div_tax,record_date,ex_date,pay_date',
+            )
+            if df is None or df.empty:
+                return []
+            df = df.sort_values(['end_date', 'ann_date'], ascending=False, na_position='last')
+            return self._frame_to_records(df, limit=limit)
+        except Exception as e:
+            logger.warning(f"Tushare 获取分红送股失败 {stock_code}: {e}")
+            return []
+
+    def get_top10_holders(self, stock_code: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get top ten holder disclosures."""
+        if self._api is None:
+            return []
+
+        try:
+            self._check_rate_limit()
+            ts_code = self._convert_stock_code(stock_code)
+            df = self._api.top10_holders(
+                ts_code=ts_code,
+                fields='ts_code,ann_date,end_date,holder_name,hold_amount,hold_ratio',
+            )
+            if df is None or df.empty:
+                return []
+            df = df.sort_values(['end_date', 'ann_date', 'hold_ratio'], ascending=[False, False, False], na_position='last')
+            return self._frame_to_records(df, limit=limit)
+        except Exception as e:
+            logger.warning(f"Tushare 获取前十大股东失败 {stock_code}: {e}")
+            return []
+
+    def get_top10_floatholders(self, stock_code: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get top ten float holder disclosures."""
+        if self._api is None:
+            return []
+
+        try:
+            self._check_rate_limit()
+            ts_code = self._convert_stock_code(stock_code)
+            df = self._api.top10_floatholders(
+                ts_code=ts_code,
+                fields='ts_code,ann_date,end_date,holder_name,hold_amount,hold_ratio',
+            )
+            if df is None or df.empty:
+                return []
+            df = df.sort_values(['end_date', 'ann_date', 'hold_ratio'], ascending=[False, False, False], na_position='last')
+            return self._frame_to_records(df, limit=limit)
+        except Exception as e:
+            logger.warning(f"Tushare 获取前十大流通股东失败 {stock_code}: {e}")
+            return []
+
+    def get_base_info(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """
+        Get merged A-share basic information from Tushare.
+
+        This combines stock list metadata, company profile, name changes,
+        dividend history, and top holder disclosures.
+        """
+        if self._api is None:
+            logger.warning("Tushare API 未初始化，无法获取股票基本信息")
+            return None
+
+        if not hasattr(self, '_base_info_cache'):
+            self._base_info_cache = {}
+        if stock_code in self._base_info_cache:
+            return dict(self._base_info_cache[stock_code])
+
+        ts_code = self._convert_stock_code(stock_code)
+        result: Dict[str, Any] = {
+            "code": stock_code,
+            "ts_code": ts_code,
+            "source": "tushare",
+        }
+
+        try:
+            self._check_rate_limit()
+            if _is_etf_code(stock_code):
+                basic_df = self._api.fund_basic(
+                    market='E',
+                    ts_code=ts_code,
+                    fields='ts_code,name,management,custodian,fund_type,found_date,due_date,list_date,'
+                           'issue_amount,m_fee,c_fee,p_value,min_amount,benchmark,status',
+                )
+            else:
+                basic_df = self._api.stock_basic(
+                    ts_code=ts_code,
+                    fields='ts_code,symbol,name,area,industry,market,list_date,cnspell,act_name,'
+                           'exchange,fullname,enname,curr_type,list_status,delist_date,is_hs',
+                )
+
+            if basic_df is not None and not basic_df.empty:
+                result.update(self._frame_to_records(basic_df, limit=1)[0])
+        except Exception as e:
+            logger.warning(f"Tushare 获取基础列表信息失败 {stock_code}: {e}")
+
+        if not _is_etf_code(stock_code):
+            try:
+                self._check_rate_limit()
+                company_df = self._api.stock_company(
+                    ts_code=ts_code,
+                    fields='ts_code,exchange,chairman,manager,secretary,reg_capital,setup_date,province,city,'
+                           'introduction,website,email,office,employees,main_business,business_scope',
+                )
+                if company_df is not None and not company_df.empty:
+                    result.update(self._frame_to_records(company_df, limit=1)[0])
+            except Exception as e:
+                logger.warning(f"Tushare 获取公司信息失败 {stock_code}: {e}")
+
+            name_changes = self.get_name_changes(stock_code, limit=10)
+            if name_changes:
+                result["name_changes"] = name_changes
+                result["former_names"] = [item.get("name") for item in name_changes if item.get("name")]
+
+            dividends = self.get_dividend(stock_code, limit=5)
+            if dividends:
+                result["dividends"] = dividends
+                result["latest_dividend"] = dividends[0]
+
+            top10_holders = self.get_top10_holders(stock_code, limit=10)
+            if top10_holders:
+                result["top10_holders"] = top10_holders
+
+            top10_floatholders = self.get_top10_floatholders(stock_code, limit=10)
+            if top10_floatholders:
+                result["top10_floatholders"] = top10_floatholders
+
+        meaningful = {k: v for k, v in result.items() if v not in (None, "", [], {})}
+        if meaningful:
+            self._base_info_cache[stock_code] = dict(meaningful)
+        return meaningful or None
+
+    def get_index_basic(self, market: str = "SSE") -> Optional[pd.DataFrame]:
+        """Get A-share index basic metadata."""
+        if self._api is None:
+            return None
+
+        try:
+            self._check_rate_limit()
+            df = self._api.index_basic(market=market)
+            return df if df is not None and not df.empty else None
+        except Exception as e:
+            logger.warning(f"Tushare 获取指数基础信息失败 {market}: {e}")
+            return None
+
+    def get_limit_list_d(self, trade_date: Optional[str] = None) -> Optional[pd.DataFrame]:
+        """Get daily A-share limit-up/limit-down list."""
+        if self._api is None:
+            return None
+
+        target_date = (trade_date or datetime.now().strftime('%Y%m%d')).replace('-', '')
+        try:
+            self._check_rate_limit()
+            df = self._api.limit_list_d(trade_date=target_date)
+            return df if df is not None and not df.empty else None
+        except Exception as e:
+            logger.warning(f"Tushare 获取涨跌停列表失败 {target_date}: {e}")
+            return None
+
+    def get_new_share(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
+        """Get recent IPO schedule data."""
+        if self._api is None:
+            return None
+
+        end = (end_date or datetime.now().strftime('%Y%m%d')).replace('-', '')
+        start = (start_date or (datetime.now() - pd.Timedelta(days=365)).strftime('%Y%m%d')).replace('-', '')
+        try:
+            self._check_rate_limit()
+            df = self._api.new_share(start_date=start, end_date=end)
+            return df if df is not None and not df.empty else None
+        except Exception as e:
+            logger.warning(f"Tushare 获取新股列表失败 {start}~{end}: {e}")
+            return None
     
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
@@ -691,52 +928,33 @@ class TushareFetcher(BaseFetcher):
             return None
 
         try:
-            self._check_rate_limit()
+            # Avoid relying on trade_cal because this token may not have
+            # permission for it, while daily(trade_date=...) is available.
+            candidate_dates = [
+                (datetime.now() - timedelta(days=offset)).strftime('%Y%m%d')
+                for offset in range(0, 7)
+            ]
 
-            # 获取最近交易日 (获取过去20天，确保有足够历史)
-            start_date = (datetime.now() - pd.Timedelta(days=20)).strftime('%Y%m%d')
-            trade_cal = self._api.trade_cal(exchange='', start_date=start_date, end_date=datetime.now().strftime('%Y%m%d'), is_open='1')
+            for trade_date in candidate_dates:
+                self._check_rate_limit()
+                df = self._api.daily(trade_date=trade_date)
+                current_len = len(df) if df is not None else 0
+                logger.info(f"[Tushare] Fetch daily stats candidate {trade_date}, records={current_len}")
 
-            if trade_cal is None or trade_cal.empty:
-                return None
+                if df is None or df.empty or current_len < 100:
+                    continue
 
-            # 确保按日期升序排列 (Tushare有时返回降序)
-            trade_cal = trade_cal.sort_values('cal_date')
+                logger.info(f"[Tushare] 使用交易日 {trade_date} 进行市场统计分析")
+                df['pct_chg'] = pd.to_numeric(df['pct_chg'], errors='coerce')
+                df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+                df = df.dropna(subset=['pct_chg'])
 
-            # 尝试获取最新一天的数据
-            last_date = trade_cal.iloc[-1]['cal_date']
-            logger.info(f"[Tushare] Calendar suggests last trading date: {last_date}")
-
-            # 注意：每日指标接口 daily 可能数据量较大
-            # 如果是在盘中调用，当天的数据可能还未生成，导致返回空或极少数据
-            df = self._api.daily(trade_date=last_date)
-
-            current_len = len(df) if df is not None else 0
-            logger.info(f"[Tushare] Initial fetch for {last_date} returned {current_len} records")
-
-            # 如果数据过少（<100条），说明当天数据未就绪，尝试使用前一交易日
-            if df is None or len(df) < 100:
-                if len(trade_cal) > 1:
-                    prev_date = trade_cal.iloc[-2]['cal_date']
-                    logger.warning(f"Data for {last_date} is incomplete (count={current_len}), falling back to {prev_date}")
-                    last_date = prev_date
-                    df = self._api.daily(trade_date=last_date)
-                else:
-                    logger.warning(f"[Tushare] {last_date} 数据不足且无可用历史交易日")
-
-            logger.info(f"Calculating stats using data from date: {last_date}")
-
-            if df is not None and not df.empty:
-                logger.info(f"[Tushare] 使用交易日 {last_date} 进行市场统计分析")
                 up_count = len(df[df['pct_chg'] > 0])
                 down_count = len(df[df['pct_chg'] < 0])
                 flat_count = len(df[df['pct_chg'] == 0])
-
-                # 涨停跌停估算 (9.9%阈值)
                 limit_up = len(df[df['pct_chg'] >= 9.9])
                 limit_down = len(df[df['pct_chg'] <= -9.9])
-
-                total_amount = df['amount'].sum() * 1000 / 1e8 # 千元 -> 元 -> 亿元
+                total_amount = df['amount'].fillna(0).sum() * 1000 / 1e8  # 千元 -> 亿元
 
                 return {
                     'up_count': up_count,
@@ -746,8 +964,8 @@ class TushareFetcher(BaseFetcher):
                     'limit_down_count': limit_down,
                     'total_amount': total_amount
                 }
-            else:
-                logger.warning("[Tushare] 获取市场统计数据为空")
+
+            logger.warning("[Tushare] 最近 7 天均未获取到可用的市场统计数据")
 
         except Exception as e:
             logger.error(f"[Tushare] 获取市场统计失败: {e}")

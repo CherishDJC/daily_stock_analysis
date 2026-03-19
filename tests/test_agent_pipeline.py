@@ -348,6 +348,15 @@ class TestAgentConstructionChain(unittest.TestCase):
         adapter = LLMToolAdapter(config=mock_cfg)
         self.assertIsNotNone(adapter)
 
+    def test_llm_adapter_normalizes_gateway_timeout_error(self):
+        """Gateway HTML errors should become readable timeout messages."""
+        from src.agent.llm_adapter import _normalize_provider_error
+
+        normalized = _normalize_provider_error(
+            RuntimeError("<html><title>504 Gateway time-out</title>cloudflare</html>")
+        )
+        self.assertIn("504 Gateway Time-out", str(normalized))
+
     def test_llm_adapter_no_args(self):
         """LLMToolAdapter should also work with no arguments (uses get_config)."""
         with patch('src.agent.llm_adapter.get_config') as mock_get_config:

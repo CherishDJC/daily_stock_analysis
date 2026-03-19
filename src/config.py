@@ -248,13 +248,14 @@ class Config:
     enable_chip_distribution: bool = True
     # 东财接口补丁开关
     enable_eastmoney_patch: bool = False
-    # 实时行情数据源优先级（逗号分隔）
-    # 推荐顺序：tencent > akshare_sina > efinance > akshare_em > tushare
+    # 实时行情主链路优先级（逗号分隔）
+    # 默认只保留轻量级主路径：tencent > akshare_sina
+    # 其他数据源（tushare / efinance / akshare_em）仅作为非关键 fallback
     # - tencent: 腾讯财经，有量比/换手率/市盈率等，单股查询稳定（推荐）
     # - akshare_sina: 新浪财经，基本行情稳定，但无量比
     # - efinance/akshare_em: 东财全量接口，数据最全但容易被封
     # - tushare: Tushare Pro，需要2000积分，数据全面（付费用户可优先使用）
-    realtime_source_priority: str = "tencent,akshare_sina,efinance,akshare_em"
+    realtime_source_priority: str = "tencent,akshare_sina"
     # 实时行情缓存时间（秒）
     realtime_cache_ttl: int = 600
     # 熔断器冷却时间（秒）
@@ -559,12 +560,11 @@ class Config:
             enable_chip_distribution=os.getenv('ENABLE_CHIP_DISTRIBUTION', 'true').lower() == 'true',
             # 东财接口补丁开关
             enable_eastmoney_patch=os.getenv('ENABLE_EASTMONEY_PATCH', 'false').lower() == 'true',
-            # 实时行情数据源优先级：
+            # 实时行情主链路优先级：
             # - tencent: 腾讯财经，有量比/换手率/PE/PB等，单股查询稳定（推荐）
             # - akshare_sina: 新浪财经，基本行情稳定，但无量比
-            # - efinance/akshare_em: 东财全量接口，数据最全但容易被封
-            # - tushare: Tushare Pro，需要2000积分，数据全面
-            realtime_source_priority=cls._resolve_realtime_source_priority(),
+            # - efinance/akshare_em/tushare: 仅作为非关键 fallback，不进入默认主链路
+            realtime_source_priority=cls._resolve_realtime_source_priority(env_file_values),
             realtime_cache_ttl=int(os.getenv('REALTIME_CACHE_TTL', '600')),
             circuit_breaker_cooldown=int(os.getenv('CIRCUIT_BREAKER_COOLDOWN', '300'))
         )
@@ -609,34 +609,20 @@ class Config:
         return 'cn'
 
     @classmethod
-    def _resolve_realtime_source_priority(cls) -> str:
+    def _resolve_realtime_source_priority(
+        cls,
+        env_file_values: Optional[Dict[str, Optional[str]]] = None,
+    ) -> str:
         """
-        Resolve realtime source priority with automatic tushare injection.
+        Resolve the primary realtime source priority.
 
-        When TUSHARE_TOKEN is configured but REALTIME_SOURCE_PRIORITY is not
-        explicitly set, automatically prepend 'tushare' to the default priority
-        so that the paid data source is utilized for realtime quotes as well.
+        Keep the hot path limited to lightweight AkShare-backed sources.
+        Paid or bulk sources remain available as non-critical fallback inside
+        DataFetcherManager, but are not auto-promoted into the primary chain.
         """
-        explicit = os.getenv('REALTIME_SOURCE_PRIORITY')
-        default_priority = 'tencent,akshare_sina,efinance,akshare_em'
-
-        if explicit:
-            # User explicitly set priority, respect it
-            return explicit
-
-        tushare_token = os.getenv('TUSHARE_TOKEN', '').strip()
-        if tushare_token:
-            # Token configured but no explicit priority override
-            # Prepend tushare so the paid source is tried first
-            import logging
-            logger = logging.getLogger(__name__)
-            resolved = f'tushare,{default_priority}'
-            logger.info(
-                f"TUSHARE_TOKEN detected, auto-injecting tushare into realtime priority: {resolved}"
-            )
-            return resolved
-
-        return default_priority
+        explicit = read_preferred_env('REALTIME_SOURCE_PRIORITY', env_file_values)
+        default_priority = 'tencent,akshare_sina'
+        return (explicit or default_priority).strip() or default_priority
 
     @classmethod
     def reset_instance(cls) -> None:

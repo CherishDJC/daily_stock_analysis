@@ -53,6 +53,39 @@ class StockRepository:
         except Exception as e:
             logger.error(f"获取最新数据失败: {e}")
             return []
+
+    def get_latest_until(self, code: str, end_date: date, limit: int) -> List[StockDaily]:
+        """
+        获取截止指定日期的最近 N 天数据
+
+        Args:
+            code: 股票代码
+            end_date: 截止日期（含）
+            limit: 返回记录上限
+
+        Returns:
+            StockDaily 对象列表（按日期升序）
+        """
+        if limit <= 0:
+            return []
+
+        try:
+            with self.db.get_session() as session:
+                results = session.execute(
+                    select(StockDaily)
+                    .where(
+                        and_(
+                            StockDaily.code == code,
+                            StockDaily.date <= end_date,
+                        )
+                    )
+                    .order_by(desc(StockDaily.date))
+                    .limit(limit)
+                ).scalars().all()
+            return list(reversed(list(results)))
+        except Exception as e:
+            logger.error(f"获取截止日期最近数据失败: {e}")
+            return []
     
     def get_range(
         self,

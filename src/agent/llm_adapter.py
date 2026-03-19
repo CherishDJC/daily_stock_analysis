@@ -59,6 +59,25 @@ _AUTO_THINKING_MODELS: List[str] = ["deepseek-reasoner", "deepseek-r1", "qwq"]
 _OPT_IN_THINKING_MODELS: Dict[str, dict] = {
     "deepseek-chat": {"thinking": {"type": "enabled"}},
 }
+_OPENAI_AGENT_MAX_OUTPUT_TOKENS = 900
+
+
+def _normalize_provider_error(error: Exception) -> Exception:
+    """Normalize noisy gateway errors into actionable user-facing messages."""
+    message = str(error or "").strip()
+    lowered = message.lower()
+    if (
+        "504" in lowered
+        or "gateway time-out" in lowered
+        or "gateway timeout" in lowered
+        or "<html" in lowered
+        or "cloudflare" in lowered
+    ):
+        return RuntimeError(
+            "上游模型网关超时（504 Gateway Time-out）。当前 OpenAI 兼容网关响应过慢，"
+            "请稍后重试，或切换到更稳定的模型 / 网关。"
+        )
+    return error
 
 
 def _model_matches(model: str, entries: List[str]) -> bool:
@@ -224,7 +243,7 @@ class LLMToolAdapter:
                     return self._call_openai(messages, tool_declarations.get("openai", []))
             except Exception as e:
                 logger.warning(f"Agent LLM call failed with {p}: {e}")
-                last_error = e
+                last_error = _normalize_provider_error(e)
                 continue
 
         error_msg = f"All LLM providers failed. Last error: {last_error}"
@@ -430,6 +449,7 @@ class LLMToolAdapter:
             "model": model_name,
             "messages": openai_messages,
             "temperature": config.openai_temperature,
+            "max_tokens": _OPENAI_AGENT_MAX_OUTPUT_TOKENS,
         }
         payload = get_thinking_extra_body(model_name)
         if payload:
@@ -516,6 +536,7 @@ class LLMToolAdapter:
             "model": model_name,
             "input": build_responses_input(non_system_messages),
             "temperature": config.openai_temperature,
+            "max_output_tokens": _OPENAI_AGENT_MAX_OUTPUT_TOKENS,
         }
         if instructions:
             call_kwargs["instructions"] = instructions

@@ -58,6 +58,16 @@ from api.v1.schemas.system_config import (
     SystemConfigValidationErrorResponse,
     SystemConfigConflictResponse,
 )
+from api.v1.schemas.market import (
+    PartialError,
+    MarketWatchlistItem,
+    MarketIndexSnapshot,
+    MarketStatsSnapshot,
+    SectorSnapshot,
+    SectorConstituentItem,
+    SectorConstituentResponse,
+    MarketOverviewResponse,
+)
 
 __all__ = [
     # common
@@ -104,4 +114,13 @@ __all__ = [
     "ValidateSystemConfigResponse",
     "SystemConfigValidationErrorResponse",
     "SystemConfigConflictResponse",
+    # market
+    "PartialError",
+    "MarketWatchlistItem",
+    "MarketIndexSnapshot",
+    "MarketStatsSnapshot",
+    "SectorSnapshot",
+    "SectorConstituentItem",
+    "SectorConstituentResponse",
+    "MarketOverviewResponse",
 ]

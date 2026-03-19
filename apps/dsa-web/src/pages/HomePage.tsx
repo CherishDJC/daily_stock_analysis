@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import type { HistoryItem, AnalysisReport, TaskInfo } from '../types/analysis';
 import { historyApi } from '../api/history';
 import { analysisApi, DuplicateTaskError } from '../api/analysis';
@@ -19,6 +19,7 @@ import { useTaskStream } from '../hooks';
 const HomePage: React.FC = () => {
   const { setLoading, setError: setStoreError } = useAnalysisStore();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   // 输入状态
   const [stockCode, setStockCode] = useState('');
@@ -190,22 +191,29 @@ const HomePage: React.FC = () => {
   }, [fetchHistory, isLoadingMore, hasMore]);
 
   // 初始加载 - 自动选择第一条（仅挂载时执行一次）
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     fetchHistory(true);
-  }, []);
+  }, [fetchHistory]);
+
+  useEffect(() => {
+    const stock = searchParams.get('stock');
+    if (!stock) return;
+
+    setStockCode(stock.toUpperCase());
+    setInputError(undefined);
+    setDuplicateError(null);
+    setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   // Background polling: re-fetch history every 30s for CLI-initiated analyses
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const interval = setInterval(() => {
       fetchHistory(false, true, true);
     }, 30_000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchHistory]);
 
   // Refresh when tab regains visibility (e.g. user ran main.py in another terminal)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
@@ -214,7 +222,7 @@ const HomePage: React.FC = () => {
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, []);
+  }, [fetchHistory]);
 
   // 点击历史项加载报告
   const handleHistoryClick = async (recordId: number) => {

@@ -379,6 +379,31 @@ class ConversationMessage(Base):
     created_at = Column(DateTime, default=datetime.now, index=True)
 
 
+class ReferenceDataCache(Base):
+    """
+    Reference data cache table for low-churn external metadata.
+
+    Stores JSON payloads with explicit TTL so the system can avoid repeated
+    requests for data that changes infrequently.
+    """
+
+    __tablename__ = 'reference_data_cache'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    namespace = Column(String(32), nullable=False, index=True)
+    cache_key = Column(String(128), nullable=False, index=True)
+    payload_json = Column(Text, nullable=False)
+    source = Column(String(64))
+    fetched_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('namespace', 'cache_key', name='uix_reference_data_cache_namespace_key'),
+        Index('ix_reference_data_cache_lookup', 'namespace', 'cache_key', 'expires_at'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器 - 单例模式

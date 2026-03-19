@@ -22,6 +22,8 @@ class ConfigPrecedenceTestCase(unittest.TestCase):
                     "OPENAI_API_STYLE=responses",
                     "TAVILY_API_KEYS=tvly-file-key-1,tvly-file-key-2",
                     "GEMINI_API_KEY=",
+                    "TUSHARE_TOKEN=file-token-123",
+                    "REALTIME_SOURCE_PRIORITY=tencent,akshare_sina",
                 ]
             )
             + "\n",
@@ -34,6 +36,8 @@ class ConfigPrecedenceTestCase(unittest.TestCase):
         os.environ["OPENAI_API_STYLE"] = "chat_completions"
         os.environ["TAVILY_API_KEYS"] = "tvly-stale-process-key"
         os.environ["GEMINI_API_KEY"] = "stale-gemini-key"
+        os.environ["TUSHARE_TOKEN"] = "stale-token"
+        os.environ["REALTIME_SOURCE_PRIORITY"] = "tushare,efinance"
         Config.reset_instance()
 
     def tearDown(self) -> None:
@@ -45,6 +49,8 @@ class ConfigPrecedenceTestCase(unittest.TestCase):
         os.environ.pop("OPENAI_API_STYLE", None)
         os.environ.pop("TAVILY_API_KEYS", None)
         os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("TUSHARE_TOKEN", None)
+        os.environ.pop("REALTIME_SOURCE_PRIORITY", None)
         self.temp_dir.cleanup()
 
     def test_env_file_wins_for_llm_and_search_settings(self) -> None:
@@ -56,6 +62,18 @@ class ConfigPrecedenceTestCase(unittest.TestCase):
         self.assertEqual(config.openai_api_style, "responses")
         self.assertEqual(config.tavily_api_keys, ["tvly-file-key-1", "tvly-file-key-2"])
         self.assertIsNone(config.gemini_api_key)
+        self.assertEqual(config.tushare_token, "file-token-123")
+        self.assertEqual(config.realtime_source_priority, "tencent,akshare_sina")
+
+    def test_tushare_token_does_not_auto_promote_into_primary_realtime_chain(self) -> None:
+        self.env_path.write_text("TUSHARE_TOKEN=file-token-123\n", encoding="utf-8")
+        os.environ.pop("REALTIME_SOURCE_PRIORITY", None)
+        Config.reset_instance()
+
+        config = Config._load_from_env()
+
+        self.assertEqual(config.tushare_token, "file-token-123")
+        self.assertEqual(config.realtime_source_priority, "tencent,akshare_sina")
 
 
 if __name__ == "__main__":

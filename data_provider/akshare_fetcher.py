@@ -1464,50 +1464,21 @@ class AkshareFetcher(BaseFetcher):
         获取板块涨跌榜
 
         数据源优先级：
-        1. 东财接口 (ak.stock_board_industry_name_em)
-        2. 新浪接口 (ak.stock_sector_spot)
+        1. 新浪行业接口 (ak.stock_sector_spot)
+        2. 东财接口 (ak.stock_board_industry_name_em)
         """
         import akshare as ak
 
-        # 优先东财接口
+        # Prefer the lighter Sina sector snapshot path first. It is currently
+        # more reliable than the EastMoney board endpoint in this deployment.
         try:
             self._set_random_user_agent()
             self._enforce_rate_limit()
 
-            logger.info("[API调用] ak.stock_board_industry_name_em() 获取板块排行...")
-            df = ak.stock_board_industry_name_em()
-            if df is not None and not df.empty:
-                change_col = '涨跌幅'
-                if change_col in df.columns:
-                    df[change_col] = pd.to_numeric(df[change_col], errors='coerce')
-                    df = df.dropna(subset=[change_col])
-
-                    # 涨幅前n
-                    top = df.nlargest(n, change_col)
-                    top_sectors = [
-                        {'name': row['板块名称'], 'change_pct': row[change_col]}
-                        for _, row in top.iterrows()
-                    ]
-
-                    bottom = df.nsmallest(n, change_col)
-                    bottom_sectors = [
-                        {'name': row['板块名称'], 'change_pct': row[change_col]}
-                        for _, row in bottom.iterrows()
-                    ]
-
-                    return top_sectors, bottom_sectors
-        except Exception as e:
-            logger.warning(f"[Akshare] 东财接口获取板块排行失败: {e}，尝试新浪接口")
-
-        # 东财失败后，尝试新浪接口
-        try:
-            self._set_random_user_agent()
-            self._enforce_rate_limit()
-
-            logger.info("[API调用] ak.stock_sector_spot() 获取板块排行(新浪)...")
-            df = ak.stock_sector_spot(indicator='新浪行业')
+            logger.info("[API调用] ak.stock_sector_spot(indicator='行业') 获取板块排行...")
+            df = ak.stock_sector_spot(indicator='行业')
             if df is None or df.empty:
-                return None
+                raise ValueError("Sina sector snapshot is empty")
 
             change_col = None
             for col in ['涨跌幅', 'change_pct', '涨幅']:
@@ -1522,7 +1493,7 @@ class AkshareFetcher(BaseFetcher):
                     break
 
             if not change_col or not name_col:
-                return None
+                raise ValueError(f"Unexpected Sina sector columns: {list(df.columns)}")
 
             df[change_col] = pd.to_numeric(df[change_col], errors='coerce')
             df = df.dropna(subset=[change_col])
@@ -1538,8 +1509,128 @@ class AkshareFetcher(BaseFetcher):
             ]
             return top_sectors, bottom_sectors
         except Exception as e:
-            logger.error(f"[Akshare] 新浪接口获取板块排行也失败: {e}")
+            logger.warning(f"[Akshare] 新浪接口获取板块排行失败: {e}，尝试东财接口")
+
+        # Sina fallback failed, try EastMoney board list.
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+
+            logger.info("[API调用] ak.stock_board_industry_name_em() 获取板块排行(东财)...")
+            df = ak.stock_board_industry_name_em()
+            if df is None or df.empty or '涨跌幅' not in df.columns:
+                return None
+
+            df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
+            df = df.dropna(subset=['涨跌幅'])
+            top = df.nlargest(n, '涨跌幅')
+            bottom = df.nsmallest(n, '涨跌幅')
+            top_sectors = [
+                {'name': str(row['板块名称']), 'change_pct': float(row['涨跌幅'])}
+                for _, row in top.iterrows()
+            ]
+            bottom_sectors = [
+                {'name': str(row['板块名称']), 'change_pct': float(row['涨跌幅'])}
+                for _, row in bottom.iterrows()
+            ]
+            return top_sectors, bottom_sectors
+        except Exception as e:
+            logger.error(f"[Akshare] 东财接口获取板块排行也失败: {e}")
             return None
+
+    def get_sector_constituents(self, sector_name: str, limit: int = 10) -> Optional[pd.DataFrame]:
+        """
+        获取行业板块成分股
+
+        优先走新浪行业快照 + 详情接口，因为当前环境下东财成分股接口不稳定。
+        """
+        import akshare as ak
+
+        safe_limit = max(1, min(int(limit), 10))
+        normalized_sector_name = str(sector_name or "").strip()
+        if not normalized_sector_name:
+            return None
+
+        self._set_random_user_agent()
+        self._enforce_rate_limit()
+
+        logger.info("[API调用] ak.stock_sector_spot(indicator='行业') -> ak.stock_sector_detail(%s)", normalized_sector_name)
+        spot_df = ak.stock_sector_spot(indicator='行业')
+        if spot_df is None or spot_df.empty or 'label' not in spot_df.columns or '板块' not in spot_df.columns:
+            return None
+
+        board_names = spot_df['板块'].fillna('').astype(str).str.strip()
+        exact_mask = board_names == normalized_sector_name
+        if exact_mask.any():
+            target_row = spot_df[exact_mask].iloc[0]
+        else:
+            contains_mask = board_names.str.contains(normalized_sector_name, na=False)
+            reverse_contains_mask = board_names.map(lambda value: bool(value) and value in normalized_sector_name)
+            matched_rows = spot_df[contains_mask | reverse_contains_mask]
+            if matched_rows.empty:
+                return None
+            target_row = matched_rows.iloc[0]
+
+        sector_label = str(target_row.get('label') or '').strip()
+        if not sector_label:
+            return None
+
+        detail_df = ak.stock_sector_detail(sector=sector_label)
+        if detail_df is None or detail_df.empty:
+            return None
+
+        normalized = detail_df.copy()
+        rename_map = {
+            'code': 'code',
+            'name': 'name',
+            'trade': 'current_price',
+            'pricechange': 'change',
+            'changepercent': 'change_percent',
+            'turnoverratio': 'turnover_rate',
+            'amount': 'amount',
+        }
+        normalized = normalized.rename(columns=rename_map)
+        for column in ['code', 'name', 'current_price', 'change', 'change_percent', 'turnover_rate', 'amount']:
+            if column not in normalized.columns:
+                normalized[column] = None
+
+        normalized['code'] = normalized['code'].astype(str).str.strip().str.upper()
+        normalized = normalized[normalized['code'].str.fullmatch(r'\d{6}', na=False)]
+        if normalized.empty:
+            return None
+
+        normalized['industry'] = normalized_sector_name
+        normalized['area'] = None
+        normalized['source'] = 'akshare_sector_detail'
+        normalized['volume_ratio'] = None
+        normalized['status'] = 'ok'
+        normalized['error_message'] = None
+
+        for column in ['current_price', 'change', 'change_percent', 'turnover_rate', 'amount']:
+            normalized[column] = pd.to_numeric(normalized[column], errors='coerce')
+
+        normalized = normalized.sort_values(
+            by=['change_percent', 'amount'],
+            ascending=[False, False],
+            na_position='last',
+        )
+        return normalized[
+            [
+                'code',
+                'name',
+                'industry',
+                'area',
+                'status',
+                'error_message',
+                'current_price',
+                'change',
+                'change_percent',
+                'volume_ratio',
+                'turnover_rate',
+                'amount',
+                'source',
+            ]
+        ].reset_index(drop=True)
 
 
 if __name__ == "__main__":
