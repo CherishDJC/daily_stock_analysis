@@ -28,8 +28,9 @@ import os
 import random
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from tenacity import (
@@ -56,6 +57,7 @@ RealtimeQuote = UnifiedRealtimeQuote
 
 
 logger = logging.getLogger(__name__)
+_CN_TZ = ZoneInfo("Asia/Shanghai")
 
 
 # User-Agent 池，用于随机轮换
@@ -85,6 +87,33 @@ _etf_realtime_cache: Dict[str, Any] = {
     'timestamp': 0,
     'ttl': 1200  # 20分钟缓存有效期
 }
+
+_minute_bar_cache: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
+_intraday_trade_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
+_MINUTE_BAR_CACHE_TTL = 15
+_INTRADAY_TRADE_CACHE_TTL = 15
+
+
+def _read_frame_cache(cache: Dict[Any, Dict[str, Any]], key: Any, ttl: int) -> Optional[pd.DataFrame]:
+    entry = cache.get(key)
+    if not entry:
+        return None
+
+    if time.time() - entry.get("timestamp", 0) > ttl:
+        cache.pop(key, None)
+        return None
+
+    cached_df = entry.get("data")
+    if cached_df is None:
+        return None
+    return cached_df.copy()
+
+
+def _write_frame_cache(cache: Dict[Any, Dict[str, Any]], key: Any, df: pd.DataFrame) -> None:
+    cache[key] = {
+        "timestamp": time.time(),
+        "data": df.copy(),
+    }
 
 
 def _is_etf_code(stock_code: str) -> bool:
@@ -702,7 +731,231 @@ class AkshareFetcher(BaseFetcher):
         df = df[existing_cols]
         
         return df
-    
+
+    @staticmethod
+    def _to_a_share_symbol(stock_code: str) -> str:
+        """Convert A-share code to AkShare symbol format."""
+        if stock_code.startswith(('6', '5', '9')):
+            return f"sh{stock_code}"
+        return f"sz{stock_code}"
+
+    @staticmethod
+    def _normalize_minute_frame(df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize AkShare minute bars to a stable schema."""
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "amount", "change_percent"])
+
+        minute_df = df.copy()
+        column_mapping = {
+            "day": "timestamp",
+            "时间": "timestamp",
+            "开盘": "open",
+            "最高": "high",
+            "最低": "low",
+            "收盘": "close",
+            "成交量": "volume",
+            "成交额": "amount",
+        }
+        minute_df = minute_df.rename(columns=column_mapping)
+
+        required_cols = ["timestamp", "open", "high", "low", "close"]
+        for column in required_cols:
+            if column not in minute_df.columns:
+                raise DataFetchError(f"分钟数据缺少必要字段: {column}")
+
+        minute_df["timestamp"] = pd.to_datetime(minute_df["timestamp"], errors="coerce")
+        minute_df = minute_df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+        numeric_columns = ["open", "high", "low", "close", "volume", "amount"]
+        for column in numeric_columns:
+            if column in minute_df.columns:
+                minute_df[column] = pd.to_numeric(minute_df[column], errors="coerce")
+
+        minute_df["change_percent"] = minute_df["close"].pct_change() * 100
+        minute_df["timestamp"] = minute_df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        keep_cols = ["timestamp", "open", "high", "low", "close", "volume", "amount", "change_percent"]
+        return minute_df[keep_cols]
+
+    @staticmethod
+    def _filter_minute_frame_by_trading_date(df: pd.DataFrame, trading_date: Optional[str]) -> pd.DataFrame:
+        """Keep only rows that belong to one trading day."""
+        if df is None or df.empty or not trading_date:
+            return df
+
+        filtered_df = df.copy()
+        timestamp_series = pd.to_datetime(filtered_df["timestamp"], errors="coerce")
+        filtered_df = filtered_df[timestamp_series.dt.strftime("%Y-%m-%d") == trading_date]
+        return filtered_df.reset_index(drop=True)
+
+    @staticmethod
+    def _normalize_time_arg(value: Optional[str], fallback: datetime) -> str:
+        """Normalize incremental fetch timestamps into AkShare-compatible strings."""
+        if value:
+            return value
+        return fallback.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _normalize_intraday_trade_frame(df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize AkShare trade tape to a stable schema."""
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["timestamp", "price", "volume", "side"])
+
+        trade_df = df.copy().rename(
+            columns={
+                "时间": "timestamp",
+                "成交价": "price",
+                "手数": "volume",
+                "买卖盘性质": "side",
+            }
+        )
+
+        required_cols = ["timestamp", "price"]
+        for column in required_cols:
+            if column not in trade_df.columns:
+                raise DataFetchError(f"逐笔成交缺少必要字段: {column}")
+
+        for column in ["price", "volume"]:
+            if column in trade_df.columns:
+                trade_df[column] = pd.to_numeric(trade_df[column], errors="coerce")
+
+        keep_cols = ["timestamp", "price", "volume", "side"]
+        trade_df = trade_df[keep_cols].dropna(subset=["timestamp", "price"])
+        return trade_df
+
+    def _fetch_minute_range_em(
+        self,
+        stock_code: str,
+        interval: str,
+        start_time: Optional[str],
+        end_time: Optional[str],
+        trading_date: Optional[str],
+    ) -> pd.DataFrame:
+        """Fetch a bounded minute range from EastMoney."""
+        import akshare as ak
+
+        current_dt = datetime.now(_CN_TZ)
+        if trading_date:
+            trading_dt = datetime.strptime(trading_date, "%Y-%m-%d")
+            default_start = datetime.combine(trading_dt.date(), datetime.min.time()).replace(hour=9, minute=30)
+        else:
+            default_start = current_dt - timedelta(days=1)
+        default_end = current_dt.replace(tzinfo=None)
+
+        normalized_start = self._normalize_time_arg(start_time, default_start)
+        normalized_end = self._normalize_time_arg(end_time, default_end)
+        logger.info(
+            f"[API调用] ak.stock_zh_a_hist_min_em(symbol={stock_code}, period={interval}, "
+            f"start_date={normalized_start}, end_date={normalized_end})"
+        )
+        minute_df = ak.stock_zh_a_hist_min_em(
+            symbol=stock_code,
+            period=interval,
+            start_date=normalized_start,
+            end_date=normalized_end,
+            adjust="",
+        )
+        normalized_df = self._normalize_minute_frame(minute_df)
+        return self._filter_minute_frame_by_trading_date(normalized_df, trading_date)
+
+    def get_minute_data(
+        self,
+        stock_code: str,
+        interval: str = "1",
+        limit: int = 240,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        trading_date: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Get minute bars from free AkShare endpoints.
+
+        Full-day current view: prefer EastMoney bounded range, fallback to Sina full feed.
+        Incremental refresh: use EastMoney bounded range only.
+        """
+        if _is_us_code(stock_code) or _is_hk_code(stock_code):
+            logger.debug(f"[分钟K] {stock_code} 非 A 股，AkShare 分钟接口跳过")
+            return None
+
+        cache_key = (stock_code, interval, limit, start_time or "", end_time or "", trading_date or "")
+        cached_df = _read_frame_cache(_minute_bar_cache, cache_key, _MINUTE_BAR_CACHE_TTL)
+        if cached_df is not None:
+            logger.debug(f"[分钟K] 命中缓存 {stock_code} interval={interval} limit={limit}")
+            return cached_df
+
+        self._set_random_user_agent()
+        self._enforce_rate_limit()
+
+        last_error: Optional[Exception] = None
+        symbol = self._to_a_share_symbol(stock_code)
+        is_incremental = start_time is not None
+
+        try:
+            normalized_df = self._fetch_minute_range_em(
+                stock_code=stock_code,
+                interval=interval,
+                start_time=start_time,
+                end_time=end_time,
+                trading_date=trading_date,
+            )
+            if not normalized_df.empty:
+                result_df = normalized_df.tail(limit).reset_index(drop=True)
+                _write_frame_cache(_minute_bar_cache, cache_key, result_df)
+                return result_df
+        except Exception as e:
+            last_error = e
+            logger.warning(f"[分钟K] stock_zh_a_hist_min_em 获取 {stock_code} 失败: {e}")
+
+        if not is_incremental:
+            try:
+                import akshare as ak
+
+                logger.info(f"[API调用] ak.stock_zh_a_minute(symbol={symbol}, period={interval})")
+                minute_df = ak.stock_zh_a_minute(symbol=symbol, period=interval, adjust="")
+                normalized_df = self._normalize_minute_frame(minute_df)
+                normalized_df = self._filter_minute_frame_by_trading_date(normalized_df, trading_date)
+                if not normalized_df.empty:
+                    result_df = normalized_df.tail(limit).reset_index(drop=True)
+                    _write_frame_cache(_minute_bar_cache, cache_key, result_df)
+                    return result_df
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[分钟K] stock_zh_a_minute 获取 {stock_code} 失败: {e}")
+
+        if last_error is not None:
+            raise DataFetchError(f"AkShare 获取分钟数据失败: {last_error}") from last_error
+        return None
+
+    def get_intraday_trades(self, stock_code: str, limit: int = 10) -> Optional[pd.DataFrame]:
+        """Get latest intraday trades from free EastMoney tape."""
+        if _is_us_code(stock_code) or _is_hk_code(stock_code):
+            logger.debug(f"[逐笔成交] {stock_code} 非 A 股，AkShare 逐笔接口跳过")
+            return None
+
+        cache_key = (stock_code, limit)
+        cached_df = _read_frame_cache(_intraday_trade_cache, cache_key, _INTRADAY_TRADE_CACHE_TTL)
+        if cached_df is not None:
+            logger.debug(f"[逐笔成交] 命中缓存 {stock_code} limit={limit}")
+            return cached_df
+
+        import akshare as ak
+
+        self._set_random_user_agent()
+        self._enforce_rate_limit()
+
+        try:
+            logger.info(f"[API调用] ak.stock_intraday_em(symbol={stock_code})")
+            trade_df = ak.stock_intraday_em(symbol=stock_code)
+            normalized_df = self._normalize_intraday_trade_frame(trade_df)
+            if normalized_df.empty:
+                return normalized_df
+
+            result_df = normalized_df.tail(limit).iloc[::-1].reset_index(drop=True)
+            _write_frame_cache(_intraday_trade_cache, cache_key, result_df)
+            return result_df
+        except Exception as e:
+            raise DataFetchError(f"AkShare 获取逐笔成交失败: {e}") from e
+
     def get_realtime_quote(self, stock_code: str, source: str = "em") -> Optional[UnifiedRealtimeQuote]:
         """
         获取实时行情数据（支持多数据源）

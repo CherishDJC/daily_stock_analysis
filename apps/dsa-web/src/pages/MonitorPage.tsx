@@ -3,7 +3,7 @@ import { useCallback, useDeferredValue, useEffect, useRef, useState } from 'reac
 import { useNavigate } from 'react-router-dom';
 import { marketApi } from '../api/market';
 import { stocksApi } from '../api/stocks';
-import type { StockHistoryPoint, StockHistoryResponse } from '../api/stocks';
+import type { StockHistoryPoint, StockHistoryResponse, StockIntradayResponse, StockMinuteBar } from '../api/stocks';
 import { Badge, Button, Card, Drawer, Select } from '../components/common';
 import type {
   MarketIndexSnapshot,
@@ -31,6 +31,7 @@ type SortKey =
 type SortDirection = 'asc' | 'desc';
 type OverviewSection = 'watchlist' | 'summary';
 type DailyKChartMode = 'preview' | 'fullscreen';
+type PricePanelViewMode = 'minute' | 'daily';
 type DailyKHoverState = {
   index: number;
   left: number;
@@ -43,6 +44,20 @@ const DAILY_K_DAYS_OPTIONS = [
   { value: '60', label: '近60日' },
   { value: '120', label: '近120日' },
 ];
+const MINUTE_INTERVAL_OPTIONS = [
+  { value: '1', label: '1分钟' },
+  { value: '5', label: '5分钟' },
+  { value: '15', label: '15分钟' },
+  { value: '30', label: '30分钟' },
+  { value: '60', label: '60分钟' },
+];
+const MINUTE_BAR_LIMITS: Record<string, number> = {
+  '1': 240,
+  '5': 240,
+  '15': 180,
+  '30': 160,
+  '60': 120,
+};
 const SUMMARY_ERROR_SCOPES = new Set(['indices', 'market_stats', 'sector_rankings']);
 const EMPTY_MARKET_STATS: MarketStatsSnapshot = {
   upCount: null,
@@ -120,7 +135,40 @@ function formatDateLabel(value?: string | null): string {
   return `${parts[1]}-${parts[2]}`;
 }
 
+function formatDateTimeLabel(value?: string | null): string {
+  if (!value) return '--';
+  const date = new Date(value.replace(' ', 'T'));
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatMinuteAxisLabel(value?: string | null): string {
+  if (!value) return '--';
+  const date = new Date(value.replace(' ', 'T'));
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function resolveHistoryChangePercent(points: StockHistoryPoint[], index: number): number | null {
+  const point = points[index];
+  if (!point) return null;
+  if (point.changePercent != null) return point.changePercent;
+  if (index === 0) return null;
+
+  const previousClose = points[index - 1]?.close;
+  if (!previousClose) return null;
+  return ((point.close - previousClose) / previousClose) * 100;
+}
+
+function resolveMinuteChangePercent(points: StockMinuteBar[], index: number): number | null {
   const point = points[index];
   if (!point) return null;
   if (point.changePercent != null) return point.changePercent;
@@ -584,6 +632,225 @@ const DailyKChart: React.FC<{
   );
 };
 
+const MinutePulseChart: React.FC<{
+  bars: StockMinuteBar[];
+  mode?: DailyKChartMode;
+  onRequestFullscreen?: () => void;
+}> = ({ bars, mode = 'preview', onRequestFullscreen }) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [hoveredBar, setHoveredBar] = useState<DailyKHoverState | null>(null);
+
+  if (!bars.length) {
+    return (
+      <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/12 bg-black/20 text-sm text-secondary">
+        暂无分时数据
+      </div>
+    );
+  }
+
+  const isFullscreen = mode === 'fullscreen';
+  const width = isFullscreen ? 1440 : 820;
+  const height = isFullscreen ? 720 : 360;
+  const padding = isFullscreen
+    ? { top: 30, right: 28, bottom: 54, left: 72 }
+    : { top: 22, right: 20, bottom: 42, left: 54 };
+  const innerWidth = width - padding.left - padding.right;
+  const innerHeight = height - padding.top - padding.bottom;
+  const priceHeight = innerHeight * 0.76;
+  const volumeHeight = innerHeight * 0.18;
+  const volumeTop = padding.top + priceHeight + 12;
+  const closes = bars.map((item) => item.close);
+  const maxPrice = Math.max(...bars.map((item) => item.high));
+  const minPrice = Math.min(...bars.map((item) => item.low));
+  const priceRange = Math.max(maxPrice - minPrice, 0.01);
+  const volumeMax = Math.max(...bars.map((item) => item.volume ?? 0), 1);
+  const stepX = innerWidth / Math.max(bars.length - 1, 1);
+  const toX = (index: number) => padding.left + stepX * index;
+  const toPriceY = (price: number) => padding.top + ((maxPrice - price) / priceRange) * priceHeight;
+  const toVolumeY = (volume?: number | null) => {
+    const normalized = Math.max((volume ?? 0) / volumeMax, 0);
+    return volumeTop + volumeHeight - normalized * volumeHeight;
+  };
+
+  const linePath = bars
+    .map((item, index) => `${index === 0 ? 'M' : 'L'} ${toX(index)} ${toPriceY(item.close)}`)
+    .join(' ');
+  const areaPath = `${linePath} L ${toX(bars.length - 1)} ${volumeTop + volumeHeight} L ${toX(0)} ${volumeTop + volumeHeight} Z`;
+  const hoveredPoint = hoveredBar ? bars[hoveredBar.index] : null;
+  const hoveredChangePercent = hoveredBar ? resolveMinuteChangePercent(bars, hoveredBar.index) : null;
+  const labelIndexes = (isFullscreen
+    ? [0, Math.floor((bars.length - 1) / 4), Math.floor((bars.length - 1) / 2), Math.floor(((bars.length - 1) * 3) / 4), bars.length - 1]
+    : [0, Math.floor((bars.length - 1) / 2), bars.length - 1]
+  ).filter((value, index, array) => array.indexOf(value) === index);
+
+  const updateHoverState = (event: React.PointerEvent<SVGRectElement>, index: number) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const left = Math.max(96, Math.min(event.clientX - rect.left, rect.width - 96));
+    const top = Math.max(isFullscreen ? 126 : 96, Math.min(event.clientY - rect.top, rect.height - 32));
+    setHoveredBar({ index, left, top });
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className={`relative overflow-hidden rounded-2xl border ${
+        isFullscreen
+          ? 'h-full border-cyan/20 bg-[linear-gradient(180deg,rgba(3,8,18,0.96),rgba(2,5,10,0.98))] p-4 shadow-[0_24px_80px_rgba(0,0,0,0.42)]'
+          : 'border-white/8 bg-black/20 p-3'
+      }`}
+    >
+      {onRequestFullscreen ? (
+        <button
+          type="button"
+          onClick={onRequestFullscreen}
+          className="absolute right-3 top-3 z-20 inline-flex items-center gap-2 rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-xs font-medium text-cyan-300 transition hover:border-cyan/50 hover:bg-cyan/15 hover:text-white"
+        >
+          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 3H5a2 2 0 00-2 2v3m16-5h-3m3 0v3m0 13h-3m3 0v-3M5 21h3m-3 0v-3" />
+          </svg>
+          全屏查看
+        </button>
+      ) : null}
+
+      {hoveredPoint ? (
+        <div
+          className="pointer-events-none absolute z-20 min-w-[212px] rounded-2xl border border-white/12 bg-[#04070d]/95 px-3 py-3 shadow-[0_18px_56px_rgba(0,0,0,0.48)]"
+          style={{
+            left: hoveredBar?.left ?? 0,
+            top: hoveredBar?.top ?? 0,
+            transform: 'translate(-50%, calc(-100% - 14px))',
+          }}
+        >
+          <p className="text-[11px] uppercase tracking-[0.24em] text-muted">INTRADAY BAR</p>
+          <p className="mt-2 text-sm font-semibold text-white">{formatDateTimeLabel(hoveredPoint.timestamp)}</p>
+          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+            <span className="text-muted">现价</span>
+            <span className="text-right font-medium text-white">{hoveredPoint.close.toFixed(2)}</span>
+            <span className="text-muted">较前一根</span>
+            <span className={`text-right font-medium ${textClassForChange(hoveredChangePercent)}`}>
+              {formatSigned(hoveredChangePercent, 2, '%')}
+            </span>
+            <span className="text-muted">开 / 高</span>
+            <span className="text-right text-secondary">
+              {hoveredPoint.open.toFixed(2)} / {hoveredPoint.high.toFixed(2)}
+            </span>
+            <span className="text-muted">低 / 收</span>
+            <span className="text-right text-secondary">
+              {hoveredPoint.low.toFixed(2)} / {hoveredPoint.close.toFixed(2)}
+            </span>
+          </div>
+        </div>
+      ) : null}
+
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className={isFullscreen ? 'h-full w-full' : 'h-[360px] w-full'}
+        role="img"
+        aria-label="Intraday chart"
+        onPointerLeave={() => setHoveredBar(null)}
+      >
+        {Array.from({ length: 4 }).map((_, index) => {
+          const price = maxPrice - (priceRange / 3) * index;
+          const y = toPriceY(price);
+          return (
+            <g key={`minute-grid-${index}`}>
+              <line
+                x1={padding.left}
+                x2={width - padding.right}
+                y1={y}
+                y2={y}
+                stroke="rgba(255,255,255,0.08)"
+                strokeDasharray="4 4"
+              />
+              <text x={10} y={y + 4} fill="rgba(255,255,255,0.56)" fontSize="11">
+                {price.toFixed(2)}
+              </text>
+            </g>
+          );
+        })}
+
+        <path d={areaPath} fill="url(#minute-area-fill)" opacity="0.92" />
+        <path d={linePath} fill="none" stroke="#22d3ee" strokeWidth={isFullscreen ? 2.6 : 2.1} strokeLinejoin="round" strokeLinecap="round" />
+
+        {bars.map((item, index) => {
+          const previousClose = index > 0 ? bars[index - 1].close : bars[0].open;
+          const barColor = item.close >= previousClose ? '#f87171' : '#34d399';
+          const barWidth = Math.max(isFullscreen ? 3.4 : 2.4, stepX * 0.52);
+          return (
+            <rect
+              key={`volume-${item.timestamp}`}
+              x={toX(index) - barWidth / 2}
+              y={toVolumeY(item.volume)}
+              width={barWidth}
+              height={Math.max(volumeTop + volumeHeight - toVolumeY(item.volume), 1)}
+              rx="1"
+              fill={barColor}
+              opacity="0.68"
+            />
+          );
+        })}
+
+        {hoveredBar ? (
+          <>
+            <rect
+              x={toX(hoveredBar.index) - stepX / 2}
+              y={padding.top}
+              width={Math.max(stepX, 6)}
+              height={innerHeight}
+              fill="rgba(34,211,238,0.06)"
+            />
+            <line
+              x1={toX(hoveredBar.index)}
+              x2={toX(hoveredBar.index)}
+              y1={padding.top}
+              y2={height - padding.bottom}
+              stroke="rgba(34,211,238,0.38)"
+              strokeDasharray="5 5"
+            />
+            <circle cx={toX(hoveredBar.index)} cy={toPriceY(closes[hoveredBar.index])} r={isFullscreen ? 4.5 : 3.5} fill="#22d3ee" />
+          </>
+        ) : null}
+
+        {bars.map((item, index) => (
+          <rect
+            key={`minute-hover-zone-${item.timestamp}`}
+            x={toX(index) - Math.max(stepX, 6) / 2}
+            y={padding.top}
+            width={Math.max(stepX, 6)}
+            height={innerHeight}
+            fill="transparent"
+            pointerEvents="all"
+            onPointerEnter={(event) => updateHoverState(event, index)}
+            onPointerMove={(event) => updateHoverState(event, index)}
+          />
+        ))}
+
+        {labelIndexes.map((index) => (
+          <text
+            key={`minute-label-${bars[index].timestamp}`}
+            x={toX(index)}
+            y={height - 10}
+            textAnchor="middle"
+            fill="rgba(255,255,255,0.56)"
+            fontSize={isFullscreen ? '12' : '11'}
+          >
+            {formatMinuteAxisLabel(bars[index].timestamp)}
+          </text>
+        ))}
+
+        <defs>
+          <linearGradient id="minute-area-fill" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.26" />
+            <stop offset="100%" stopColor="#22d3ee" stopOpacity="0.01" />
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
+  );
+};
+
 const DailyKTable: React.FC<{ points: StockHistoryPoint[] }> = ({ points }) => {
   const recentPoints = [...points].slice(-8).reverse();
 
@@ -644,7 +911,7 @@ const SectorConstituentDrawer: React.FC<{
             <span className="label-uppercase">SECTOR DRILL-DOWN</span>
             <h3 className="mt-1 text-2xl font-semibold text-white">{sectorName || '--'}</h3>
             <p className="mt-2 text-sm text-secondary">
-              展示最多 10 只行业相关股，点击任意股票可继续查看日 K。
+              展示最多 10 只行业相关股，点击任意股票可继续查看分时与日 K 走势。
             </p>
           </div>
 
@@ -750,18 +1017,29 @@ const SectorConstituentDrawer: React.FC<{
   );
 };
 
-const DailyKFullscreenOverlay: React.FC<{
+const PriceChartFullscreenOverlay: React.FC<{
   isOpen: boolean;
   onClose: () => void;
-  historyLoading: boolean;
-  points: StockHistoryPoint[];
+  viewMode: PricePanelViewMode;
+  dailyLoading: boolean;
+  dailyPoints: StockHistoryPoint[];
+  intradayLoading: boolean;
+  minuteBars: StockMinuteBar[];
 }> = ({
   isOpen,
   onClose,
-  historyLoading,
-  points,
+  viewMode,
+  dailyLoading,
+  dailyPoints,
+  intradayLoading,
+  minuteBars,
 }) => {
   if (!isOpen) return null;
+
+  const isMinuteView = viewMode === 'minute';
+  const isLoading = isMinuteView ? intradayLoading : dailyLoading;
+  const hasData = isMinuteView ? minuteBars.length > 0 : dailyPoints.length > 0;
+  const emptyLabel = isMinuteView ? '暂无分时数据' : '暂无日 K 数据';
 
   return (
     <div className="fixed inset-0 z-[70] bg-[rgba(2,6,12,0.96)] backdrop-blur-md" onClick={onClose}>
@@ -780,16 +1058,22 @@ const DailyKFullscreenOverlay: React.FC<{
           </Button>
 
           <div className="h-full p-2 md:p-3">
-            {historyLoading && !points.length ? (
+            {isLoading && !hasData ? (
               <div className="flex h-full items-center justify-center rounded-[24px] border border-white/10 bg-black/35 text-sm text-secondary">
-                日K 加载中...
+                {isMinuteView ? '分时加载中...' : '日K 加载中...'}
               </div>
-            ) : !points.length ? (
+            ) : !hasData ? (
               <div className="flex h-full items-center justify-center rounded-[24px] border border-dashed border-white/12 bg-black/35 text-sm text-secondary">
-                暂无日 K 数据
+                {emptyLabel}
               </div>
             ) : (
-              <DailyKChart points={points} mode="fullscreen" />
+              <>
+                {isMinuteView ? (
+                  <MinutePulseChart bars={minuteBars} mode="fullscreen" />
+                ) : (
+                  <DailyKChart points={dailyPoints} mode="fullscreen" />
+                )}
+              </>
             )}
           </div>
         </div>
@@ -818,15 +1102,23 @@ const MonitorPage: React.FC = () => {
   const [sectorDetail, setSectorDetail] = useState<SectorConstituentResponse>(EMPTY_SECTOR_CONSTITUENTS);
   const [sectorDetailLoading, setSectorDetailLoading] = useState(false);
   const [sectorDetailError, setSectorDetailError] = useState<string | null>(null);
+  const [pricePanelViewMode, setPricePanelViewMode] = useState<PricePanelViewMode>('minute');
   const [historyDays, setHistoryDays] = useState('60');
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyData, setHistoryData] = useState<StockHistoryResponse | null>(null);
+  const [historyLoadedKey, setHistoryLoadedKey] = useState('');
+  const [minuteInterval, setMinuteInterval] = useState('1');
+  const [intradayLoading, setIntradayLoading] = useState(false);
+  const [intradayError, setIntradayError] = useState<string | null>(null);
+  const [intradayData, setIntradayData] = useState<StockIntradayResponse | null>(null);
+  const [intradayLoadedKey, setIntradayLoadedKey] = useState('');
   const [historyFullscreen, setHistoryFullscreen] = useState(false);
   const sessionStateRef = useRef<MarketSessionState | null>(null);
   const autoRefreshInitializedRef = useRef(false);
   const overviewRef = useRef<MarketOverviewResponse>(EMPTY_OVERVIEW);
   const historyRequestIdRef = useRef(0);
+  const intradayRequestIdRef = useRef(0);
   const sectorRequestIdRef = useRef(0);
 
   useEffect(() => {
@@ -910,24 +1202,6 @@ const MonitorPage: React.FC = () => {
     return () => window.clearInterval(interval);
   }, [autoRefresh, overview.refreshIntervalSeconds, fetchWatchlistOverview]);
 
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        void fetchWatchlistOverview(false);
-        if (
-          !overviewRef.current.indices.length &&
-          !overviewRef.current.topSectors.length &&
-          !overviewRef.current.bottomSectors.length
-        ) {
-          void fetchSummaryOverview(false);
-        }
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [fetchSummaryOverview, fetchWatchlistOverview]);
-
   const loadDailyHistory = useCallback(async (stockCode: string, days: number) => {
     const requestId = ++historyRequestIdRef.current;
     setHistoryLoading(true);
@@ -937,13 +1211,46 @@ const MonitorPage: React.FC = () => {
       const response = await stocksApi.getHistory(stockCode, days, 'daily');
       if (requestId !== historyRequestIdRef.current) return;
       setHistoryData(response);
+      setHistoryLoadedKey(`${stockCode}:${days}`);
     } catch (err) {
       if (requestId !== historyRequestIdRef.current) return;
       setHistoryError(err instanceof Error ? err.message : '加载日 K 失败');
       setHistoryData(null);
+      setHistoryLoadedKey('');
     } finally {
       if (requestId === historyRequestIdRef.current) {
         setHistoryLoading(false);
+      }
+    }
+  }, []);
+
+  const loadIntradayData = useCallback(async (stockCode: string, interval: string, limit: number, includeTrades = true) => {
+    const requestId = ++intradayRequestIdRef.current;
+    setIntradayLoading(true);
+    setIntradayError(null);
+
+    try {
+      const response = await stocksApi.getIntraday(stockCode, interval, limit, includeTrades);
+      if (requestId !== intradayRequestIdRef.current) return;
+      setIntradayData((current) => {
+        if (includeTrades) {
+          return response;
+        }
+        return {
+          ...response,
+          trades: current?.stockCode === response.stockCode ? current.trades : response.trades,
+          tradesSource: current?.stockCode === response.stockCode ? current.tradesSource || response.tradesSource : response.tradesSource,
+        };
+      });
+      setIntradayLoadedKey(`${stockCode}:${interval}:${limit}`);
+    } catch (err) {
+      if (requestId !== intradayRequestIdRef.current) return;
+      setIntradayError(err instanceof Error ? err.message : '加载分时失败');
+      setIntradayData(null);
+      setIntradayLoadedKey('');
+    } finally {
+      if (requestId === intradayRequestIdRef.current) {
+        setIntradayLoading(false);
       }
     }
   }, []);
@@ -968,10 +1275,62 @@ const MonitorPage: React.FC = () => {
     }
   }, []);
 
+  const minuteBarLimit = MINUTE_BAR_LIMITS[minuteInterval] ?? 240;
+
   useEffect(() => {
-    if (!selectedStock) return;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchWatchlistOverview(false);
+        if (selectedStock && pricePanelViewMode === 'minute') {
+          void loadIntradayData(selectedStock.stockCode, minuteInterval, minuteBarLimit, false);
+        }
+        if (
+          !overviewRef.current.indices.length &&
+          !overviewRef.current.topSectors.length &&
+          !overviewRef.current.bottomSectors.length
+        ) {
+          void fetchSummaryOverview(false);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [fetchSummaryOverview, fetchWatchlistOverview, loadIntradayData, minuteBarLimit, minuteInterval, pricePanelViewMode, selectedStock]);
+
+  useEffect(() => {
+    if (!selectedStock || pricePanelViewMode !== 'daily') return;
+    const nextKey = `${selectedStock.stockCode}:${historyDays}`;
+    if (historyLoadedKey === nextKey) return;
     void loadDailyHistory(selectedStock.stockCode, Number(historyDays));
-  }, [historyDays, loadDailyHistory, selectedStock]);
+  }, [historyDays, historyLoadedKey, loadDailyHistory, pricePanelViewMode, selectedStock]);
+
+  useEffect(() => {
+    if (!selectedStock || pricePanelViewMode !== 'minute') return;
+    const nextKey = `${selectedStock.stockCode}:${minuteInterval}:${minuteBarLimit}`;
+    if (intradayLoadedKey === nextKey) return;
+    void loadIntradayData(selectedStock.stockCode, minuteInterval, minuteBarLimit, true);
+  }, [intradayLoadedKey, loadIntradayData, minuteBarLimit, minuteInterval, pricePanelViewMode, selectedStock]);
+
+  useEffect(() => {
+    if (!selectedStock || pricePanelViewMode !== 'minute' || overview.sessionState !== 'open') return;
+
+    const refreshSeconds = Math.max(15, overview.refreshIntervalSeconds || 15);
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void loadIntradayData(selectedStock.stockCode, minuteInterval, minuteBarLimit, false);
+    }, refreshSeconds * 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [
+    loadIntradayData,
+    minuteBarLimit,
+    minuteInterval,
+    overview.refreshIntervalSeconds,
+    overview.sessionState,
+    pricePanelViewMode,
+    selectedStock,
+  ]);
 
   useEffect(() => {
     if (!selectedStock) {
@@ -994,10 +1353,18 @@ const MonitorPage: React.FC = () => {
   }, [historyFullscreen]);
 
   const openDailyK = useCallback((item: Pick<MarketWatchlistItem, 'stockCode' | 'stockName'>) => {
+    historyRequestIdRef.current += 1;
+    intradayRequestIdRef.current += 1;
     setSelectedStock({ stockCode: item.stockCode, stockName: item.stockName });
+    setPricePanelViewMode('minute');
     setHistoryError(null);
     setHistoryData(null);
+    setHistoryLoadedKey('');
     setHistoryDays('60');
+    setMinuteInterval('1');
+    setIntradayError(null);
+    setIntradayData(null);
+    setIntradayLoadedKey('');
   }, []);
 
   const openSectorDetail = useCallback((sector: SectorSnapshot) => {
@@ -1021,11 +1388,17 @@ const MonitorPage: React.FC = () => {
 
   const closeDailyK = useCallback(() => {
     historyRequestIdRef.current += 1;
+    intradayRequestIdRef.current += 1;
     setHistoryFullscreen(false);
     setSelectedStock(null);
     setHistoryError(null);
     setHistoryLoading(false);
     setHistoryData(null);
+    setHistoryLoadedKey('');
+    setIntradayError(null);
+    setIntradayLoading(false);
+    setIntradayData(null);
+    setIntradayLoadedKey('');
     if (resumeSectorDrawerAfterDailyK && selectedSector) {
       setSectorDrawerVisible(true);
       setResumeSectorDrawerAfterDailyK(false);
@@ -1060,6 +1433,16 @@ const MonitorPage: React.FC = () => {
     Object.values(marketStats).some((value) => value != null);
   const historyPoints = historyData?.data || [];
   const latestHistoryPoint = historyPoints.length ? historyPoints[historyPoints.length - 1] : null;
+  const minuteBars = intradayData?.bars || [];
+  const latestMinuteBar = minuteBars.length ? minuteBars[minuteBars.length - 1] : null;
+  const minuteStartBar = minuteBars.length ? minuteBars[0] : null;
+  const minuteNetChange = latestMinuteBar && minuteStartBar ? latestMinuteBar.close - minuteStartBar.close : null;
+  const minuteNetChangePercent =
+    latestMinuteBar && minuteStartBar && minuteStartBar.close
+      ? ((latestMinuteBar.close - minuteStartBar.close) / minuteStartBar.close) * 100
+      : latestMinuteBar?.changePercent ?? null;
+  const intradayTrades = intradayData?.trades || [];
+  const activeChartError = pricePanelViewMode === 'minute' ? intradayError : historyError;
 
   return (
     <div className="min-h-screen px-4 pb-6 pt-4 md:px-6">
@@ -1233,7 +1616,7 @@ const MonitorPage: React.FC = () => {
             <span className="label-uppercase">WATCHLIST MATRIX</span>
             <h2 className="mt-1 text-xl font-semibold text-white">自选股看盘表</h2>
             <p className="mt-2 text-sm text-secondary">
-              默认按涨跌幅排序，失败项自动置底。支持本地搜索和列排序，点击股票可打开最近日 K。
+              默认按涨跌幅排序，失败项自动置底。支持本地搜索和列排序，点击股票可打开分时 / 日 K 走势面板。
             </p>
           </div>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -1350,7 +1733,7 @@ const MonitorPage: React.FC = () => {
                             <Badge variant={item.status === 'ok' ? 'success' : 'danger'}>
                               {item.status === 'ok' ? '正常' : '失败'}
                             </Badge>
-                            <Badge variant="info">日K</Badge>
+                            <Badge variant="info">走势</Badge>
                           </div>
                           <p className="mt-1 text-sm text-secondary">
                             {item.stockName || item.errorMessage || '暂无股票名称'}
@@ -1395,56 +1778,110 @@ const MonitorPage: React.FC = () => {
       <Drawer
         isOpen={Boolean(selectedStock)}
         onClose={closeDailyK}
-        title={selectedStock ? `${selectedStock.stockCode} ${selectedStock.stockName || ''} 日K` : '日K'}
+        title={selectedStock ? `${selectedStock.stockCode} ${selectedStock.stockName || ''} 走势` : '走势'}
         width="max-w-5xl"
         closeOnEscape={!historyFullscreen}
       >
         <div className="space-y-6">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <span className="label-uppercase">DAILY K SNAPSHOT</span>
+              <span className="label-uppercase">INTRADAY + DAILY</span>
               <h3 className="mt-1 text-2xl font-semibold text-white">
                 {selectedStock?.stockName || selectedStock?.stockCode || '--'}
               </h3>
               <p className="mt-2 text-sm text-secondary">
-                复用现有历史行情接口，默认展示日线数据。切换周期会重新请求后端。
+                {pricePanelViewMode === 'minute'
+                  ? '分时模式使用免费 AkShare 分钟接口，默认展示盘中脉冲走势；逐笔成交作为补充信息尽力返回。'
+                  : '日K 模式继续复用现有历史行情接口，适合回看近 30/60/120 日结构。'}
               </p>
             </div>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Button
-                variant="gradient"
-                onClick={openAiAnalysis}
-                disabled={!selectedStock}
-              >
-                AI分析
-              </Button>
-              <Select
-                value={historyDays}
-                onChange={setHistoryDays}
-                options={DAILY_K_DAYS_OPTIONS}
-                label="查看区间"
-                className="min-w-[160px]"
-              />
-              <Button
-                variant="outline"
-                isLoading={historyLoading}
-                onClick={() => selectedStock && void loadDailyHistory(selectedStock.stockCode, Number(historyDays))}
-              >
-                刷新日K
-              </Button>
+
+            <div className="flex flex-col gap-3 lg:items-end">
+              <div className="inline-flex rounded-full border border-white/10 bg-black/25 p-1">
+                <button
+                  type="button"
+                  onClick={() => setPricePanelViewMode('minute')}
+                  className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+                    pricePanelViewMode === 'minute'
+                      ? 'bg-cyan/18 text-white shadow-[0_12px_24px_rgba(0,212,255,0.12)]'
+                      : 'text-secondary hover:text-white'
+                  }`}
+                >
+                  分时脉冲
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPricePanelViewMode('daily')}
+                  className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+                    pricePanelViewMode === 'daily'
+                      ? 'bg-cyan/18 text-white shadow-[0_12px_24px_rgba(0,212,255,0.12)]'
+                      : 'text-secondary hover:text-white'
+                  }`}
+                >
+                  日K 回看
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <Button
+                  variant="gradient"
+                  onClick={openAiAnalysis}
+                  disabled={!selectedStock}
+                >
+                  AI分析
+                </Button>
+                {pricePanelViewMode === 'minute' ? (
+                  <Select
+                    value={minuteInterval}
+                    onChange={setMinuteInterval}
+                    options={MINUTE_INTERVAL_OPTIONS}
+                    label="分钟周期"
+                    className="min-w-[160px]"
+                  />
+                ) : (
+                  <Select
+                    value={historyDays}
+                    onChange={setHistoryDays}
+                    options={DAILY_K_DAYS_OPTIONS}
+                    label="查看区间"
+                    className="min-w-[160px]"
+                  />
+                )}
+                <Button
+                  variant="outline"
+                  isLoading={pricePanelViewMode === 'minute' ? intradayLoading : historyLoading}
+                  onClick={() => {
+                    if (!selectedStock) return;
+                    if (pricePanelViewMode === 'minute') {
+                      void loadIntradayData(selectedStock.stockCode, minuteInterval, minuteBarLimit);
+                      return;
+                    }
+                    void loadDailyHistory(selectedStock.stockCode, Number(historyDays));
+                  }}
+                >
+                  {pricePanelViewMode === 'minute' ? '刷新分时' : '刷新日K'}
+                </Button>
+              </div>
             </div>
           </div>
 
-          {historyError ? (
+          {activeChartError ? (
             <Card variant="bordered" padding="md" className="border-red-500/30 bg-red-500/5">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <span className="label-uppercase">KLINE FAILED</span>
-                  <p className="mt-1 text-sm text-secondary">{historyError}</p>
+                  <span className="label-uppercase">{pricePanelViewMode === 'minute' ? 'INTRADAY FAILED' : 'KLINE FAILED'}</span>
+                  <p className="mt-1 text-sm text-secondary">{activeChartError}</p>
                 </div>
                 <Button
                   variant="danger"
-                  onClick={() => selectedStock && void loadDailyHistory(selectedStock.stockCode, Number(historyDays))}
+                  onClick={() => {
+                    if (!selectedStock) return;
+                    if (pricePanelViewMode === 'minute') {
+                      void loadIntradayData(selectedStock.stockCode, minuteInterval, minuteBarLimit);
+                      return;
+                    }
+                    void loadDailyHistory(selectedStock.stockCode, Number(historyDays));
+                  }}
                 >
                   重试
                 </Button>
@@ -1452,86 +1889,192 @@ const MonitorPage: React.FC = () => {
             </Card>
           ) : null}
 
-          <div className="grid gap-4 xl:grid-cols-[1.4fr_0.9fr]">
+          <div className="grid gap-4 xl:grid-cols-[1.4fr_0.95fr]">
             <div>
-              {historyLoading && !historyPoints.length ? (
-                <div className="flex h-[320px] items-center justify-center rounded-2xl border border-white/8 bg-black/20 text-sm text-secondary">
-                  日K 加载中...
-                </div>
+              {pricePanelViewMode === 'minute' ? (
+                <>
+                  {intradayLoading && !minuteBars.length ? (
+                    <div className="flex h-[360px] items-center justify-center rounded-2xl border border-white/8 bg-black/20 text-sm text-secondary">
+                      分时数据加载中...
+                    </div>
+                  ) : (
+                    <MinutePulseChart bars={minuteBars} onRequestFullscreen={() => setHistoryFullscreen(true)} />
+                  )}
+                </>
               ) : (
-                <DailyKChart points={historyPoints} onRequestFullscreen={() => setHistoryFullscreen(true)} />
+                <>
+                  {historyLoading && !historyPoints.length ? (
+                    <div className="flex h-[320px] items-center justify-center rounded-2xl border border-white/8 bg-black/20 text-sm text-secondary">
+                      日K 加载中...
+                    </div>
+                  ) : (
+                    <DailyKChart points={historyPoints} onRequestFullscreen={() => setHistoryFullscreen(true)} />
+                  )}
+                </>
               )}
             </div>
 
-            <div className="grid gap-3">
-              <Card variant="gradient" padding="md">
-                <span className="label-uppercase">LATEST BAR</span>
-                <div className="mt-3 grid grid-cols-2 gap-3">
-                  <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted">日期</p>
-                    <p className="mt-1 text-sm font-semibold text-white">{latestHistoryPoint?.date || '--'}</p>
+            {pricePanelViewMode === 'minute' ? (
+              <div className="grid gap-3">
+                <Card variant="gradient" padding="md">
+                  <span className="label-uppercase">PULSE SNAPSHOT</span>
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">最新时间</p>
+                      <p className="mt-1 text-sm font-semibold text-white">{formatDateTimeLabel(latestMinuteBar?.timestamp)}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">最新价</p>
+                      <p className={`mt-1 text-sm font-semibold ${textClassForChange(minuteNetChange)}`}>
+                        {latestMinuteBar ? latestMinuteBar.close.toFixed(2) : '--'}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">区间涨跌</p>
+                      <p className={`mt-1 text-sm font-semibold ${textClassForChange(minuteNetChangePercent)}`}>
+                        {formatSigned(minuteNetChangePercent, 2, '%')}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">K线根数</p>
+                      <p className="mt-1 text-sm font-semibold text-white">{minuteBars.length || '--'}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">分钟源</p>
+                      <p className="mt-1 text-sm font-semibold text-white">{intradayData?.source || '--'}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">逐笔源</p>
+                      <p className="mt-1 text-sm font-semibold text-white">{intradayData?.tradesSource || '--'}</p>
+                    </div>
                   </div>
-                  <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted">收盘</p>
-                    <p className={`mt-1 text-sm font-semibold ${textClassForChange(latestHistoryPoint ? latestHistoryPoint.close - latestHistoryPoint.open : null)}`}>
-                      {latestHistoryPoint ? latestHistoryPoint.close.toFixed(2) : '--'}
-                    </p>
-                  </div>
-                  <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted">区间</p>
-                    <p className="mt-1 text-sm font-semibold text-white">
-                      {latestHistoryPoint ? `${latestHistoryPoint.low.toFixed(2)} / ${latestHistoryPoint.high.toFixed(2)}` : '--'}
-                    </p>
-                  </div>
-                  <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted">涨跌幅</p>
-                    <p className={`mt-1 text-sm font-semibold ${textClassForChange(latestHistoryPoint?.changePercent)}`}>
-                      {formatSigned(latestHistoryPoint?.changePercent, 2, '%')}
-                    </p>
-                  </div>
-                  <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted">成交量</p>
-                    <p className="mt-1 text-sm font-semibold text-white">{formatAmount(latestHistoryPoint?.volume)}</p>
-                  </div>
-                  <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted">成交额</p>
-                    <p className="mt-1 text-sm font-semibold text-white">{formatAmount(latestHistoryPoint?.amount)}</p>
-                  </div>
-                </div>
-              </Card>
+                </Card>
 
-              <Card variant="gradient" padding="md">
-                <span className="label-uppercase">DATA RANGE</span>
-                <div className="mt-3 space-y-2 text-sm text-secondary">
-                  <p>当前返回 {historyPoints.length} 根日 K</p>
-                  <p>
-                    周期固定为日线，后端接口：
-                    <code className="ml-1 rounded bg-white/8 px-1.5 py-0.5 text-xs text-white">/api/v1/stocks/{'{code}'}/history</code>
-                  </p>
-                  <p>点击其他股票会直接切换到新的日 K 快照。</p>
-                </div>
-              </Card>
-            </div>
-          </div>
+                <Card variant="gradient" padding="md">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <span className="label-uppercase">RECENT PRINTS</span>
+                      <h4 className="mt-1 text-lg font-semibold text-white">最近逐笔成交</h4>
+                    </div>
+                    <Badge variant={intradayTrades.length ? 'info' : 'warning'}>{intradayTrades.length || 0}</Badge>
+                  </div>
 
-          <div>
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <span className="label-uppercase">RECENT BARS</span>
-                <h4 className="mt-1 text-lg font-semibold text-white">最近 8 根日 K</h4>
+                  {intradayTrades.length ? (
+                    <div className="mt-4 space-y-2">
+                      {intradayTrades.map((trade) => (
+                        <div
+                          key={`trade-${trade.timestamp}-${trade.price}`}
+                          className="grid grid-cols-[0.92fr_0.9fr_0.7fr] items-center gap-3 rounded-xl border border-white/8 bg-black/20 px-3 py-2.5 text-sm"
+                        >
+                          <span className="text-secondary">{trade.timestamp}</span>
+                          <span className="font-semibold text-white">{trade.price.toFixed(2)}</span>
+                          <span className={`text-right ${trade.side?.includes('买') ? 'text-red-400' : trade.side?.includes('卖') ? 'text-emerald-400' : 'text-secondary'}`}>
+                            {trade.side || '--'}
+                            {trade.volume != null ? ` · ${trade.volume.toFixed(0)}手` : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/20 px-4 py-6 text-sm text-secondary">
+                      逐笔成交为尽力返回项，当前免费接口未返回有效结果，但分钟K仍可正常使用。
+                    </div>
+                  )}
+                </Card>
               </div>
-              {historyLoading && historyPoints.length ? <Badge variant="info">刷新中</Badge> : null}
-            </div>
-            <DailyKTable points={historyPoints} />
+            ) : (
+              <div className="grid gap-3">
+                <Card variant="gradient" padding="md">
+                  <span className="label-uppercase">LATEST BAR</span>
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">日期</p>
+                      <p className="mt-1 text-sm font-semibold text-white">{latestHistoryPoint?.date || '--'}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">收盘</p>
+                      <p className={`mt-1 text-sm font-semibold ${textClassForChange(latestHistoryPoint ? latestHistoryPoint.close - latestHistoryPoint.open : null)}`}>
+                        {latestHistoryPoint ? latestHistoryPoint.close.toFixed(2) : '--'}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">区间</p>
+                      <p className="mt-1 text-sm font-semibold text-white">
+                        {latestHistoryPoint ? `${latestHistoryPoint.low.toFixed(2)} / ${latestHistoryPoint.high.toFixed(2)}` : '--'}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">涨跌幅</p>
+                      <p className={`mt-1 text-sm font-semibold ${textClassForChange(latestHistoryPoint?.changePercent)}`}>
+                        {formatSigned(latestHistoryPoint?.changePercent, 2, '%')}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">成交量</p>
+                      <p className="mt-1 text-sm font-semibold text-white">{formatAmount(latestHistoryPoint?.volume)}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-muted">成交额</p>
+                      <p className="mt-1 text-sm font-semibold text-white">{formatAmount(latestHistoryPoint?.amount)}</p>
+                    </div>
+                  </div>
+                </Card>
+
+                <Card variant="gradient" padding="md">
+                  <span className="label-uppercase">DATA RANGE</span>
+                  <div className="mt-3 space-y-2 text-sm text-secondary">
+                    <p>当前返回 {historyPoints.length} 根日 K</p>
+                    <p>
+                      周期固定为日线，后端接口：
+                      <code className="ml-1 rounded bg-white/8 px-1.5 py-0.5 text-xs text-white">/api/v1/stocks/{'{code}'}/history</code>
+                    </p>
+                    <p>切回分时模式即可查看免费分钟级走势。</p>
+                  </div>
+                </Card>
+              </div>
+            )}
           </div>
+
+          {pricePanelViewMode === 'daily' ? (
+            <div>
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <span className="label-uppercase">RECENT BARS</span>
+                  <h4 className="mt-1 text-lg font-semibold text-white">最近 8 根日 K</h4>
+                </div>
+                {historyLoading && historyPoints.length ? <Badge variant="info">刷新中</Badge> : null}
+              </div>
+              <DailyKTable points={historyPoints} />
+            </div>
+          ) : (
+            <Card variant="gradient" padding="md">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <span className="label-uppercase">FREE INTRADAY FEED</span>
+                  <h4 className="mt-1 text-lg font-semibold text-white">免费分钟线试运行版</h4>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="info">AkShare</Badge>
+                  <Badge variant="history">{minuteInterval} 分钟</Badge>
+                  <Badge variant="default">最近 {minuteBars.length} 根</Badge>
+                </div>
+              </div>
+              <p className="mt-3 text-sm leading-6 text-secondary">
+                分时模式以免费分钟接口为主链路，优先保证单股走势可视化。逐笔成交属于补充信息，若源站波动会自动降级为空，不影响主图展示。
+              </p>
+            </Card>
+          )}
         </div>
       </Drawer>
 
-      <DailyKFullscreenOverlay
+      <PriceChartFullscreenOverlay
         isOpen={historyFullscreen}
         onClose={() => setHistoryFullscreen(false)}
-        historyLoading={historyLoading}
-        points={historyPoints}
+        viewMode={pricePanelViewMode}
+        dailyLoading={historyLoading}
+        dailyPoints={historyPoints}
+        intradayLoading={intradayLoading}
+        minuteBars={minuteBars}
       />
 
       <SectorConstituentDrawer

@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Tests for realtime source routing and market overview fetcher ordering."""
+"""Tests for realtime source routing, reference cache, and intraday behavior."""
 
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -57,6 +58,9 @@ class FakeAkshareFetcher(_NoopFetcher):
         self.base_info_calls = 0
         self.stock_list = None
         self.sector_constituents = None
+        self.minute_calls: list[dict[str, object]] = []
+        self.minute_initial_df: pd.DataFrame | None = None
+        self.minute_incremental_df: pd.DataFrame | None = None
 
     def get_realtime_quote(self, stock_code: str, source: str = "em"):
         self.calls.append(source)
@@ -77,6 +81,29 @@ class FakeAkshareFetcher(_NoopFetcher):
 
     def get_sector_constituents(self, sector_name: str, limit: int = 10):
         return self.sector_constituents
+
+    def get_minute_data(
+        self,
+        stock_code: str,
+        interval: str = "1",
+        limit: int = 240,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        trading_date: str | None = None,
+    ):
+        self.minute_calls.append(
+            {
+                "stock_code": stock_code,
+                "interval": interval,
+                "limit": limit,
+                "start_time": start_time,
+                "end_time": end_time,
+                "trading_date": trading_date,
+            }
+        )
+        if start_time:
+            return self.minute_incremental_df
+        return self.minute_initial_df
 
 
 class FakeEfinanceFetcher(_NoopFetcher):
@@ -321,6 +348,77 @@ class RealtimeSourceRoutingTestCase(unittest.TestCase):
 
         self.assertEqual(len(result), 2)
         self.assertEqual(result.iloc[0]["code"], "600001")
+
+    def test_intraday_uses_db_cache_then_refreshes_recent_minutes_in_background(self) -> None:
+        cache_repo = FakeReferenceCacheRepo()
+        akshare = FakeAkshareFetcher({})
+        akshare.minute_initial_df = pd.DataFrame(
+            [
+                {"timestamp": "2026-03-19 09:30:00", "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 100, "amount": 1000.0, "change_percent": None},
+                {"timestamp": "2026-03-19 09:31:00", "open": 10.0, "high": 10.2, "low": 10.0, "close": 10.2, "volume": 120, "amount": 1224.0, "change_percent": 2.0},
+            ]
+        )
+        akshare.minute_incremental_df = pd.DataFrame(
+            [
+                {"timestamp": "2026-03-19 09:31:00", "open": 10.0, "high": 10.25, "low": 10.0, "close": 10.25, "volume": 130, "amount": 1332.5, "change_percent": 2.5},
+                {"timestamp": "2026-03-19 09:32:00", "open": 10.25, "high": 10.3, "low": 10.2, "close": 10.3, "volume": 140, "amount": 1442.0, "change_percent": 0.49},
+            ]
+        )
+        manager = DataFetcherManager(
+            fetchers=[akshare],
+            reference_cache_repo=cache_repo,
+            now_provider=lambda: datetime(2026, 3, 19, 10, 5),
+            intraday_refresh_submitter=lambda task: task(),
+        )
+
+        first_df, first_source = manager.get_minute_data("301428", interval="1", limit=240)
+        second_df, second_source = manager.get_minute_data("301428", interval="1", limit=240)
+        third_df, third_source = manager.get_minute_data("301428", interval="1", limit=240)
+
+        self.assertEqual(first_source, "AkshareFetcher")
+        self.assertEqual(second_source, "AkshareFetcher")
+        self.assertEqual(third_source, "AkshareFetcher")
+        self.assertEqual(len(first_df), 2)
+        self.assertEqual(len(second_df), 2)
+        self.assertEqual(len(third_df), 3)
+        self.assertEqual(third_df.iloc[-1]["timestamp"], "2026-03-19 09:32:00")
+        self.assertEqual(third_df.iloc[-2]["close"], 10.25)
+        self.assertEqual(len(akshare.minute_calls), 3)
+        self.assertIsNone(akshare.minute_calls[0]["start_time"])
+        self.assertIsNotNone(akshare.minute_calls[1]["start_time"])
+        self.assertIsNotNone(akshare.minute_calls[2]["start_time"])
+        self.assertIn(("intraday_1m", "301428:2026-03-19"), cache_repo.store)
+
+    def test_intraday_aggregates_cached_1m_bars_into_requested_interval(self) -> None:
+        cache_repo = FakeReferenceCacheRepo({
+            ("intraday_1m", "301428:2026-03-19"): {
+                "trading_date": "2026-03-19",
+                "source": "cache",
+                "updated_at": "2026-03-19T10:00:00+08:00",
+                "bars": [
+                    {"timestamp": "2026-03-19 09:30:00", "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.05, "volume": 100.0, "amount": 1005.0, "change_percent": None},
+                    {"timestamp": "2026-03-19 09:31:00", "open": 10.05, "high": 10.2, "low": 10.0, "close": 10.18, "volume": 120.0, "amount": 1221.6, "change_percent": 1.29},
+                    {"timestamp": "2026-03-19 09:35:00", "open": 10.18, "high": 10.3, "low": 10.15, "close": 10.25, "volume": 140.0, "amount": 1435.0, "change_percent": 0.69},
+                ],
+            }
+        })
+        akshare = FakeAkshareFetcher({})
+        akshare.minute_incremental_df = pd.DataFrame()
+        manager = DataFetcherManager(
+            fetchers=[akshare],
+            reference_cache_repo=cache_repo,
+            now_provider=lambda: datetime(2026, 3, 19, 10, 5),
+            intraday_refresh_submitter=lambda task: task(),
+        )
+
+        result_df, source = manager.get_minute_data("301428", interval="5", limit=240)
+
+        self.assertEqual(source, "cache")
+        self.assertEqual(len(result_df), 2)
+        self.assertEqual(result_df.iloc[0]["timestamp"], "2026-03-19 09:30:00")
+        self.assertEqual(result_df.iloc[0]["close"], 10.18)
+        self.assertEqual(result_df.iloc[1]["timestamp"], "2026-03-19 09:35:00")
+        self.assertEqual(result_df.iloc[1]["close"], 10.25)
 
 
 if __name__ == "__main__":

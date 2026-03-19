@@ -16,10 +16,13 @@
 
 import logging
 import random
+import threading
 import time
 from abc import ABC, abstractmethod
-from datetime import datetime
-from typing import Optional, List, Tuple, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, time as dt_time
+from typing import Optional, List, Tuple, Dict, Any, Callable
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import numpy as np
@@ -67,7 +70,14 @@ _REFERENCE_CACHE_TTLS = {
     "belong_board": 7 * 24 * 3600,
     "index_basic": 30 * 24 * 3600,
     "stock_list": 24 * 3600,
+    "intraday_1m": 24 * 3600,
 }
+
+_CN_TZ = ZoneInfo("Asia/Shanghai")
+_INTRADAY_CACHE_NAMESPACE = "intraday_1m"
+_INTRADAY_REFRESH_LOOKBACK_MINUTES = 8
+_INTRADAY_MARKET_OPEN = dt_time(hour=9, minute=30)
+_INTRADAY_MARKET_CLOSE = dt_time(hour=15, minute=0)
 
 
 # === 标准化列名定义 ===
@@ -243,6 +253,44 @@ class BaseFetcher(ABC):
         """
         return None
 
+    def get_minute_data(
+        self,
+        stock_code: str,
+        interval: str = "1",
+        limit: int = 240,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        trading_date: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
+        """
+        获取分钟级 K 线数据
+
+        Args:
+            stock_code: 股票代码
+            interval: 分钟周期，支持 1/5/15/30/60
+            limit: 返回最近多少根
+            start_time: 增量刷新起始时间，格式 YYYY-MM-DD HH:MM:SS
+            end_time: 增量刷新结束时间，格式 YYYY-MM-DD HH:MM:SS
+            trading_date: 交易日，格式 YYYY-MM-DD
+
+        Returns:
+            DataFrame: 包含 timestamp/open/high/low/close/volume/amount/change_percent
+        """
+        return None
+
+    def get_intraday_trades(self, stock_code: str, limit: int = 10) -> Optional[pd.DataFrame]:
+        """
+        获取最近逐笔成交数据
+
+        Args:
+            stock_code: 股票代码
+            limit: 返回最近多少条
+
+        Returns:
+            DataFrame: 包含 timestamp/price/volume/side
+        """
+        return None
+
     def get_daily_data(
         self,
         stock_code: str, 
@@ -388,7 +436,17 @@ class DataFetcherManager:
     - 所有数据源都失败时抛出异常
     """
     
-    def __init__(self, fetchers: Optional[List[BaseFetcher]] = None, reference_cache_repo=None):
+    _intraday_refresh_lock = threading.Lock()
+    _intraday_refresh_inflight: set[str] = set()
+    _intraday_refresh_executor: Optional[ThreadPoolExecutor] = None
+
+    def __init__(
+        self,
+        fetchers: Optional[List[BaseFetcher]] = None,
+        reference_cache_repo=None,
+        now_provider: Optional[Callable[[], datetime]] = None,
+        intraday_refresh_submitter: Optional[Callable[[Callable[[], None]], None]] = None,
+    ):
         """
         初始化管理器
         
@@ -397,6 +455,8 @@ class DataFetcherManager:
         """
         self._fetchers: List[BaseFetcher] = []
         self._reference_cache_repo = reference_cache_repo
+        self._now_provider = now_provider or (lambda: datetime.now(_CN_TZ))
+        self._intraday_refresh_submitter = intraday_refresh_submitter
         
         if fetchers:
             # 按优先级排序
@@ -445,6 +505,257 @@ class DataFetcherManager:
             repo.set_json(namespace, cache_key, payload, ttl_seconds=ttl_seconds, source=source)
         except Exception as e:
             logger.debug("[ReferenceCache] write failed %s/%s: %s", namespace, cache_key, e)
+
+    def _current_cn_datetime(self) -> datetime:
+        """Return current time in Asia/Shanghai."""
+        current_dt = self._now_provider()
+        if current_dt.tzinfo is None:
+            return current_dt.replace(tzinfo=_CN_TZ)
+        return current_dt.astimezone(_CN_TZ)
+
+    @classmethod
+    def _get_intraday_refresh_executor(cls) -> ThreadPoolExecutor:
+        """Return the shared executor used for background intraday refresh tasks."""
+        if cls._intraday_refresh_executor is None:
+            with cls._intraday_refresh_lock:
+                if cls._intraday_refresh_executor is None:
+                    cls._intraday_refresh_executor = ThreadPoolExecutor(
+                        max_workers=2,
+                        thread_name_prefix="intraday_refresh",
+                    )
+        return cls._intraday_refresh_executor
+
+    @staticmethod
+    def _intraday_cache_key(stock_code: str, trading_date: str) -> str:
+        """Build the DB cache key for one stock on one trading day."""
+        return f"{stock_code}:{trading_date}"
+
+    @staticmethod
+    def _get_intraday_refresh_start(latest_ts: datetime, trading_date: str) -> str:
+        """Compute the bounded lookback window for incremental intraday refresh."""
+        market_open_dt = datetime.strptime(
+            f"{trading_date} {_INTRADAY_MARKET_OPEN.strftime('%H:%M:%S')}",
+            "%Y-%m-%d %H:%M:%S",
+        )
+        refresh_dt = max(
+            latest_ts - timedelta(minutes=_INTRADAY_REFRESH_LOOKBACK_MINUTES),
+            market_open_dt,
+        )
+        return refresh_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _normalize_intraday_cache_payload(payload: Any) -> Tuple[pd.DataFrame, Optional[str]]:
+        """Convert cached JSON payload back into a minute-bar DataFrame."""
+        if not isinstance(payload, dict):
+            return pd.DataFrame(), None
+
+        records = payload.get("bars") or []
+        if not isinstance(records, list):
+            return pd.DataFrame(), payload.get("source")
+
+        df = pd.DataFrame(records)
+        if df.empty:
+            return pd.DataFrame(), payload.get("source")
+
+        for column in ["timestamp", "open", "high", "low", "close", "volume", "amount", "change_percent"]:
+            if column not in df.columns:
+                df[column] = None
+
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+        numeric_columns = ["open", "high", "low", "close", "volume", "amount", "change_percent"]
+        for column in numeric_columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+        return df.reset_index(drop=True), payload.get("source")
+
+    @staticmethod
+    def _serialize_intraday_cache_payload(df: pd.DataFrame, source: Optional[str], trading_date: str, updated_at: datetime) -> Dict[str, Any]:
+        """Serialize intraday minute bars for DB cache storage."""
+        records = []
+        if df is not None and not df.empty:
+            normalized = df.copy()
+            normalized["timestamp"] = pd.to_datetime(normalized["timestamp"], errors="coerce")
+            normalized = normalized.dropna(subset=["timestamp"]).sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+            normalized["timestamp"] = normalized["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+            records = normalized.to_dict("records")
+
+        return {
+            "trading_date": trading_date,
+            "updated_at": updated_at.isoformat(),
+            "source": source,
+            "bars": records,
+        }
+
+    @staticmethod
+    def _merge_intraday_frames(cached_df: Optional[pd.DataFrame], fresh_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+        """Merge cached/fresh minute bars by timestamp and recompute change."""
+        frames = []
+        for frame in (cached_df, fresh_df):
+            if frame is not None and not frame.empty:
+                frames.append(frame.copy())
+        if not frames:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "amount", "change_percent"])
+
+        merged = pd.concat(frames, ignore_index=True)
+        merged["timestamp"] = pd.to_datetime(merged["timestamp"], errors="coerce")
+        merged = merged.dropna(subset=["timestamp"]).sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+        for column in ["open", "high", "low", "close", "volume", "amount"]:
+            merged[column] = pd.to_numeric(merged[column], errors="coerce")
+        merged["change_percent"] = merged["close"].pct_change() * 100
+        return merged.reset_index(drop=True)
+
+    @staticmethod
+    def _aggregate_intraday_bars(df: pd.DataFrame, interval: str) -> pd.DataFrame:
+        """Aggregate 1-minute bars into the requested interval."""
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "amount", "change_percent"])
+
+        if interval == "1":
+            result = df.copy()
+            result["change_percent"] = result["close"].pct_change() * 100
+            return result.reset_index(drop=True)
+
+        freq_map = {
+            "5": "5min",
+            "15": "15min",
+            "30": "30min",
+            "60": "60min",
+        }
+        freq = freq_map.get(interval)
+        if not freq:
+            raise ValueError(f"Unsupported intraday interval: {interval}")
+
+        grouped = df.copy()
+        grouped["bucket"] = grouped["timestamp"].dt.floor(freq)
+        aggregated = (
+            grouped.groupby("bucket", as_index=False)
+            .agg(
+                open=("open", "first"),
+                high=("high", "max"),
+                low=("low", "min"),
+                close=("close", "last"),
+                volume=("volume", "sum"),
+                amount=("amount", "sum"),
+            )
+            .rename(columns={"bucket": "timestamp"})
+        )
+        aggregated["change_percent"] = aggregated["close"].pct_change() * 100
+        return aggregated.reset_index(drop=True)
+
+    def _fetch_intraday_1m_frame(
+        self,
+        stock_code: str,
+        trading_date: str,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> Tuple[pd.DataFrame, str]:
+        """Fetch 1-minute bars for one trading day, with optional incremental window."""
+        errors = []
+        for fetcher in self._fetchers:
+            try:
+                df = fetcher.get_minute_data(
+                    stock_code=stock_code,
+                    interval="1",
+                    limit=240,
+                    start_time=start_time,
+                    end_time=end_time,
+                    trading_date=trading_date,
+                )
+                if df is not None and not df.empty:
+                    logger.info(
+                        f"[{fetcher.name}] 成功获取 {stock_code} 1分钟数据 trading_date={trading_date} start={start_time or '--'}"
+                    )
+                    return df, fetcher.name
+            except Exception as e:
+                error_msg = f"[{fetcher.name}] 失败: {str(e)}"
+                logger.warning(error_msg)
+                errors.append(error_msg)
+                continue
+
+        error_summary = f"所有数据源获取 {stock_code} 当日1分钟数据失败:\n" + "\n".join(errors)
+        logger.error(error_summary)
+        raise DataFetchError(error_summary)
+
+    def _run_intraday_refresh(
+        self,
+        cache_key: str,
+        stock_code: str,
+        trading_date: str,
+        cached_df: pd.DataFrame,
+        cached_source: Optional[str],
+    ) -> None:
+        """Refresh cached intraday bars in the background without blocking the request."""
+        try:
+            if cached_df is None or cached_df.empty:
+                return
+
+            latest_ts = pd.to_datetime(cached_df["timestamp"], errors="coerce").max()
+            if pd.isna(latest_ts):
+                return
+
+            latest_dt = latest_ts.to_pydatetime()
+            refresh_start = self._get_intraday_refresh_start(latest_dt, trading_date)
+            refresh_end = self._current_cn_datetime().strftime("%Y-%m-%d %H:%M:%S")
+            fresh_df, source = self._fetch_intraday_1m_frame(
+                stock_code=stock_code,
+                trading_date=trading_date,
+                start_time=refresh_start,
+                end_time=refresh_end,
+            )
+            merged_df = self._merge_intraday_frames(cached_df, fresh_df)
+            if merged_df.empty:
+                return
+
+            resolved_source = source or cached_source
+            self._write_reference_cache(
+                _INTRADAY_CACHE_NAMESPACE,
+                cache_key,
+                self._serialize_intraday_cache_payload(
+                    merged_df,
+                    source=resolved_source,
+                    trading_date=trading_date,
+                    updated_at=self._current_cn_datetime(),
+                ),
+                source=resolved_source,
+            )
+            logger.debug("[分钟K] 后台刷新完成 %s", cache_key)
+        except Exception as e:
+            logger.warning("[分钟K] 后台刷新失败 %s: %s", cache_key, e)
+        finally:
+            with self._intraday_refresh_lock:
+                self._intraday_refresh_inflight.discard(cache_key)
+
+    def _schedule_intraday_refresh(
+        self,
+        cache_key: str,
+        stock_code: str,
+        trading_date: str,
+        cached_df: pd.DataFrame,
+        cached_source: Optional[str],
+    ) -> bool:
+        """Schedule one background refresh per cache key and return whether it was accepted."""
+        with self._intraday_refresh_lock:
+            if cache_key in self._intraday_refresh_inflight:
+                return False
+            self._intraday_refresh_inflight.add(cache_key)
+
+        task = lambda: self._run_intraday_refresh(
+            cache_key=cache_key,
+            stock_code=stock_code,
+            trading_date=trading_date,
+            cached_df=cached_df.copy(),
+            cached_source=cached_source,
+        )
+        try:
+            if self._intraday_refresh_submitter is not None:
+                self._intraday_refresh_submitter(task)
+            else:
+                self._get_intraday_refresh_executor().submit(task)
+            return True
+        except Exception:
+            with self._intraday_refresh_lock:
+                self._intraday_refresh_inflight.discard(cache_key)
+            raise
     
     def _init_default_fetchers(self) -> None:
         """
@@ -584,6 +895,103 @@ class DataFetcherManager:
         
         # 所有数据源都失败
         error_summary = f"所有数据源获取 {stock_code} 失败:\n" + "\n".join(errors)
+        logger.error(error_summary)
+        raise DataFetchError(error_summary)
+
+    def get_minute_data(
+        self,
+        stock_code: str,
+        interval: str = "1",
+        limit: int = 240,
+    ) -> Tuple[pd.DataFrame, str]:
+        """
+        获取分钟级 K 线数据（自动切换数据源）
+
+        Args:
+            stock_code: 股票代码
+            interval: 分钟周期，支持 1/5/15/30/60
+            limit: 返回最近多少根
+
+        Returns:
+            Tuple[DataFrame, str]: (数据, 成功的数据源名称)
+        """
+        stock_code = normalize_stock_code(stock_code)
+        current_dt = self._current_cn_datetime()
+        trading_date = current_dt.date().isoformat()
+        cache_key = self._intraday_cache_key(stock_code, trading_date)
+        cached_payload = self._read_reference_cache(_INTRADAY_CACHE_NAMESPACE, cache_key)
+        cached_df, cached_source = self._normalize_intraday_cache_payload(cached_payload)
+        if not cached_df.empty:
+            self._schedule_intraday_refresh(
+                cache_key=cache_key,
+                stock_code=stock_code,
+                trading_date=trading_date,
+                cached_df=cached_df,
+                cached_source=cached_source,
+            )
+            aggregated_df = self._aggregate_intraday_bars(cached_df, interval).tail(limit).reset_index(drop=True)
+            aggregated_df["timestamp"] = pd.to_datetime(aggregated_df["timestamp"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+            return aggregated_df, cached_source or "cache"
+
+        refresh_end = current_dt.strftime("%Y-%m-%d %H:%M:%S")
+        fresh_df, source = self._fetch_intraday_1m_frame(
+            stock_code=stock_code,
+            trading_date=trading_date,
+            start_time=None,
+            end_time=refresh_end,
+        )
+
+        merged_df = self._merge_intraday_frames(pd.DataFrame(), fresh_df)
+        if merged_df.empty:
+            raise DataFetchError(f"{stock_code} 分钟数据为空")
+
+        self._write_reference_cache(
+            _INTRADAY_CACHE_NAMESPACE,
+            cache_key,
+            self._serialize_intraday_cache_payload(
+                merged_df,
+                source=source,
+                trading_date=trading_date,
+                updated_at=current_dt,
+            ),
+            source=source,
+        )
+
+        aggregated_df = self._aggregate_intraday_bars(merged_df, interval).tail(limit).reset_index(drop=True)
+        aggregated_df["timestamp"] = pd.to_datetime(aggregated_df["timestamp"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+        return aggregated_df, source or "cache"
+
+    def get_intraday_trades(
+        self,
+        stock_code: str,
+        limit: int = 10,
+    ) -> Tuple[pd.DataFrame, str]:
+        """
+        获取最近逐笔成交数据（自动切换数据源）
+
+        Args:
+            stock_code: 股票代码
+            limit: 返回最近多少条
+
+        Returns:
+            Tuple[DataFrame, str]: (数据, 成功的数据源名称)
+        """
+        stock_code = normalize_stock_code(stock_code)
+        errors = []
+
+        for fetcher in self._fetchers:
+            try:
+                df = fetcher.get_intraday_trades(stock_code=stock_code, limit=limit)
+                if df is not None and not df.empty:
+                    logger.info(f"[{fetcher.name}] 成功获取 {stock_code} 逐笔成交")
+                    return df, fetcher.name
+            except Exception as e:
+                error_msg = f"[{fetcher.name}] 失败: {str(e)}"
+                logger.warning(error_msg)
+                errors.append(error_msg)
+                continue
+
+        error_summary = f"所有数据源获取 {stock_code} 逐笔成交失败:\n" + "\n".join(errors)
         logger.error(error_summary)
         raise DataFetchError(error_summary)
     

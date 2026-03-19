@@ -35,6 +35,9 @@ from api.v1.schemas.stocks import (
     StockQuote,
     StockHistoryResponse,
     KLineData,
+    MinuteBarData,
+    IntradayTradeData,
+    StockIntradayResponse,
 )
 from api.v1.schemas.backtest import (
     BacktestRunRequest,
@@ -94,6 +97,9 @@ __all__ = [
     "StockQuote",
     "StockHistoryResponse",
     "KLineData",
+    "MinuteBarData",
+    "IntradayTradeData",
+    "StockIntradayResponse",
     # backtest
     "BacktestRunRequest",
     "BacktestRunResponse",

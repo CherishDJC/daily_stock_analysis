@@ -52,6 +52,40 @@ class StockServiceHistoryCacheTestCase(unittest.TestCase):
             )
         return pd.DataFrame(rows)
 
+    def _make_minute_df(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "timestamp": "2026-03-18 09:30:00",
+                    "open": 38.80,
+                    "high": 38.92,
+                    "low": 38.75,
+                    "close": 38.90,
+                    "volume": 10200,
+                    "amount": 396780.0,
+                    "change_percent": None,
+                },
+                {
+                    "timestamp": "2026-03-18 09:31:00",
+                    "open": 38.90,
+                    "high": 39.01,
+                    "low": 38.88,
+                    "close": 38.98,
+                    "volume": 8600,
+                    "amount": 335228.0,
+                    "change_percent": 0.21,
+                },
+            ]
+        )
+
+    def _make_trade_df(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {"timestamp": "09:31:12", "price": 38.98, "volume": 20, "side": "买盘"},
+                {"timestamp": "09:31:20", "price": 38.97, "volume": 12, "side": "卖盘"},
+            ]
+        )
+
     def test_history_uses_cached_stable_rows_and_only_refreshes_recent_window(self) -> None:
         self.repo.save_dataframe(
             self._make_daily_df(date(2026, 3, 10), 8, start_close=90.0),
@@ -140,6 +174,50 @@ class StockServiceHistoryCacheTestCase(unittest.TestCase):
         )
         self.assertEqual(len(result["data"]), 6)
         self.assertEqual(result["data"][-1]["date"], "2026-03-17")
+
+    def test_intraday_returns_minute_bars_and_recent_trades(self) -> None:
+        manager = MagicMock()
+        manager.get_minute_data.return_value = (self._make_minute_df(), "AkshareFetcher")
+        manager.get_intraday_trades.return_value = (self._make_trade_df(), "AkshareFetcher")
+        manager.get_stock_name.return_value = "世纪恒通"
+
+        service = StockService(
+            repo=self.repo,
+            manager_factory=lambda: manager,
+            today_provider=lambda: self.today,
+        )
+
+        result = service.get_intraday_data("301428", interval="1", limit=120)
+
+        manager.get_minute_data.assert_called_once_with(
+            stock_code="301428",
+            interval="1",
+            limit=120,
+        )
+        manager.get_intraday_trades.assert_called_once_with(stock_code="301428", limit=10)
+        self.assertEqual(result["stock_name"], "世纪恒通")
+        self.assertEqual(result["source"], "AkshareFetcher")
+        self.assertEqual(len(result["bars"]), 2)
+        self.assertEqual(result["bars"][1]["change_percent"], 0.21)
+        self.assertEqual(result["trades"][0]["side"], "买盘")
+
+    def test_intraday_degrades_when_trade_feed_fails(self) -> None:
+        manager = MagicMock()
+        manager.get_minute_data.return_value = (self._make_minute_df(), "AkshareFetcher")
+        manager.get_intraday_trades.side_effect = RuntimeError("RemoteDisconnected")
+        manager.get_stock_name.return_value = "世纪恒通"
+
+        service = StockService(
+            repo=self.repo,
+            manager_factory=lambda: manager,
+            today_provider=lambda: self.today,
+        )
+
+        result = service.get_intraday_data("301428", interval="5", limit=80)
+
+        self.assertEqual(result["interval"], "5")
+        self.assertEqual(len(result["bars"]), 2)
+        self.assertEqual(result["trades"], [])
 
 
 if __name__ == "__main__":

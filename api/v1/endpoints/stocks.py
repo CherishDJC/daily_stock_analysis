@@ -8,6 +8,7 @@
 1. POST /api/v1/stocks/extract-from-image 从图片提取股票代码
 2. GET /api/v1/stocks/{code}/quote 实时行情接口
 3. GET /api/v1/stocks/{code}/history 历史行情接口
+4. GET /api/v1/stocks/{code}/intraday 分钟级行情接口
 """
 
 import logging
@@ -17,8 +18,11 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from api.v1.schemas.stocks import (
     ExtractFromImageResponse,
+    IntradayTradeData,
     KLineData,
+    MinuteBarData,
     StockHistoryResponse,
+    StockIntradayResponse,
     StockQuote,
 )
 from api.v1.schemas.common import ErrorResponse
@@ -256,4 +260,83 @@ def get_stock_history(
                 "error": "internal_error",
                 "message": f"获取历史行情失败: {str(e)}"
             }
+        )
+
+
+@router.get(
+    "/{stock_code}/intraday",
+    response_model=StockIntradayResponse,
+    responses={
+        200: {"description": "分钟级行情数据"},
+        422: {"description": "不支持的分钟周期参数", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="获取股票分钟级行情",
+    description="获取指定股票的分钟 K 线和最近逐笔成交（免费数据源版）",
+)
+def get_stock_intraday(
+    stock_code: str,
+    interval: str = Query("1", description="分钟周期", pattern="^(1|5|15|30|60)$"),
+    limit: int = Query(240, ge=30, le=960, description="分钟K返回条数"),
+    include_trades: bool = Query(True, description="是否附带最近逐笔成交"),
+) -> StockIntradayResponse:
+    """Get stock intraday minute bars and recent trades."""
+    try:
+        service = StockService()
+        result = service.get_intraday_data(
+            stock_code=stock_code,
+            interval=interval,
+            limit=limit,
+            include_trades=include_trades,
+        )
+
+        bars = [
+            MinuteBarData(
+                timestamp=item.get("timestamp"),
+                open=item.get("open"),
+                high=item.get("high"),
+                low=item.get("low"),
+                close=item.get("close"),
+                volume=item.get("volume"),
+                amount=item.get("amount"),
+                change_percent=item.get("change_percent"),
+            )
+            for item in result.get("bars", [])
+        ]
+        trades = [
+            IntradayTradeData(
+                timestamp=item.get("timestamp"),
+                price=item.get("price"),
+                volume=item.get("volume"),
+                side=item.get("side"),
+            )
+            for item in result.get("trades", [])
+        ]
+
+        return StockIntradayResponse(
+            stock_code=stock_code,
+            stock_name=result.get("stock_name"),
+            interval=result.get("interval", interval),
+            source=result.get("source"),
+            trades_source=result.get("trades_source"),
+            updated_at=result.get("updated_at"),
+            bars=bars,
+            trades=trades,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "unsupported_interval",
+                "message": str(e),
+            },
+        )
+    except Exception as e:
+        logger.error(f"获取分钟行情失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"获取分钟行情失败: {str(e)}",
+            },
         )

@@ -76,6 +76,52 @@ class KLineData(BaseModel):
         }
 
 
+class MinuteBarData(BaseModel):
+    """Minute bar data point."""
+
+    timestamp: str = Field(..., description="分钟时间")
+    open: float = Field(..., description="开盘价")
+    high: float = Field(..., description="最高价")
+    low: float = Field(..., description="最低价")
+    close: float = Field(..., description="收盘价")
+    volume: Optional[float] = Field(None, description="成交量")
+    amount: Optional[float] = Field(None, description="成交额")
+    change_percent: Optional[float] = Field(None, description="相对前一根涨跌幅 (%)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "timestamp": "2026-03-19 10:30:00",
+                "open": 38.88,
+                "high": 39.03,
+                "low": 38.82,
+                "close": 39.01,
+                "volume": 56900,
+                "amount": 2218526.01,
+                "change_percent": 0.18,
+            }
+        }
+
+
+class IntradayTradeData(BaseModel):
+    """Intraday trade data point."""
+
+    timestamp: str = Field(..., description="成交时间")
+    price: float = Field(..., description="成交价")
+    volume: Optional[float] = Field(None, description="成交量（手）")
+    side: Optional[str] = Field(None, description="买卖盘性质")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "timestamp": "10:31:27",
+                "price": 39.01,
+                "volume": 67.0,
+                "side": "买盘",
+            }
+        }
+
+
 class ExtractFromImageResponse(BaseModel):
     """图片股票代码提取响应"""
 
@@ -98,5 +144,32 @@ class StockHistoryResponse(BaseModel):
                 "stock_name": "贵州茅台",
                 "period": "daily",
                 "data": []
+            }
+        }
+
+
+class StockIntradayResponse(BaseModel):
+    """Stock intraday minute response."""
+
+    stock_code: str = Field(..., description="股票代码")
+    stock_name: Optional[str] = Field(None, description="股票名称")
+    interval: str = Field(..., description="分钟周期")
+    source: Optional[str] = Field(None, description="分钟K线数据源")
+    trades_source: Optional[str] = Field(None, description="逐笔成交数据源")
+    updated_at: Optional[str] = Field(None, description="更新时间")
+    bars: List[MinuteBarData] = Field(default_factory=list, description="分钟K线数据")
+    trades: List[IntradayTradeData] = Field(default_factory=list, description="最近逐笔成交")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "stock_code": "301428",
+                "stock_name": "世纪恒通",
+                "interval": "1",
+                "source": "AkshareFetcher",
+                "trades_source": "AkshareFetcher",
+                "updated_at": "2026-03-19T10:31:30+08:00",
+                "bars": [],
+                "trades": [],
             }
         }

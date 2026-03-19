@@ -160,6 +160,54 @@ class AkshareFetcherSectorFallbackTestCase(unittest.TestCase):
         self.assertEqual(top[0]["name"], "半导体")
         self.assertEqual(bottom[0]["name"], "煤炭")
 
+    def test_get_minute_data_can_fallback_to_sina_on_initial_full_day_request(self) -> None:
+        minute_df = pd.DataFrame(
+            [
+                {
+                    "day": "2026-03-19 09:30:00",
+                    "open": "10.00",
+                    "high": "10.10",
+                    "low": "9.98",
+                    "close": "10.08",
+                    "volume": "1000",
+                    "amount": "10080",
+                },
+                {
+                    "day": "2026-03-19 09:31:00",
+                    "open": "10.08",
+                    "high": "10.12",
+                    "low": "10.05",
+                    "close": "10.10",
+                    "volume": "1200",
+                    "amount": "12120",
+                },
+            ]
+        )
+        fake_akshare = SimpleNamespace(
+            stock_zh_a_hist_min_em=MagicMock(side_effect=RuntimeError("em down")),
+            stock_zh_a_minute=MagicMock(return_value=minute_df),
+        )
+
+        with patch("data_provider.akshare_fetcher.get_config", return_value=SimpleNamespace(enable_eastmoney_patch=False)):
+            fetcher = AkshareFetcher(sleep_min=0.0, sleep_max=0.0)
+
+        fetcher._set_random_user_agent = MagicMock()
+        fetcher._enforce_rate_limit = MagicMock()
+
+        with patch.dict(sys.modules, {"akshare": fake_akshare}):
+            result = fetcher.get_minute_data(
+                "301428",
+                interval="1",
+                limit=240,
+                start_time=None,
+                end_time="2026-03-19 12:40:00",
+                trading_date="2026-03-19",
+            )
+
+        self.assertEqual(len(result), 2)
+        fake_akshare.stock_zh_a_hist_min_em.assert_called_once()
+        fake_akshare.stock_zh_a_minute.assert_called_once_with(symbol="sz301428", period="1", adjust="")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -173,6 +173,112 @@ class StockService:
             logger.error(f"获取历史数据失败: {e}", exc_info=True)
             return {"stock_code": stock_code, "period": period, "data": []}
 
+    def get_intraday_data(
+        self,
+        stock_code: str,
+        interval: str = "1",
+        limit: int = 240,
+        include_trades: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Get intraday minute bars and recent trades.
+
+        Args:
+            stock_code: 股票代码
+            interval: 分钟周期，支持 1/5/15/30/60
+            limit: 返回最近多少根分钟K
+            include_trades: 是否附带最近逐笔成交
+
+        Returns:
+            分钟级行情响应字典
+        """
+        if interval not in {"1", "5", "15", "30", "60"}:
+            raise ValueError(f"暂不支持 '{interval}' 分钟周期，仅支持 1/5/15/30/60。")
+
+        try:
+            manager = self._create_manager()
+            bars_df, source = manager.get_minute_data(
+                stock_code=stock_code,
+                interval=interval,
+                limit=limit,
+            )
+
+            try:
+                stock_name = manager.get_stock_name(stock_code)
+            except Exception as e:
+                logger.warning("获取 %s 股票名称失败，回退为代码: %s", stock_code, e)
+                stock_name = stock_code
+
+            bars = []
+            if bars_df is not None and not bars_df.empty:
+                for _, row in bars_df.iterrows():
+                    bars.append(
+                        {
+                            "timestamp": str(row.get("timestamp")),
+                            "open": self._to_float(row.get("open"), default=0.0) or 0.0,
+                            "high": self._to_float(row.get("high"), default=0.0) or 0.0,
+                            "low": self._to_float(row.get("low"), default=0.0) or 0.0,
+                            "close": self._to_float(row.get("close"), default=0.0) or 0.0,
+                            "volume": self._to_float(row.get("volume")),
+                            "amount": self._to_float(row.get("amount")),
+                            "change_percent": self._to_float(row.get("change_percent")),
+                        }
+                    )
+
+            trades = []
+            trades_source: Optional[str] = None
+            if include_trades:
+                try:
+                    trade_df, trades_source = manager.get_intraday_trades(stock_code=stock_code, limit=10)
+                    if trade_df is not None and not trade_df.empty:
+                        for _, row in trade_df.iterrows():
+                            trades.append(
+                                {
+                                    "timestamp": str(row.get("timestamp")),
+                                    "price": self._to_float(row.get("price"), default=0.0) or 0.0,
+                                    "volume": self._to_float(row.get("volume")),
+                                    "side": row.get("side"),
+                                }
+                            )
+                except Exception as e:
+                    logger.warning("获取 %s 逐笔成交失败，降级为空列表: %s", stock_code, e)
+
+            return {
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "interval": interval,
+                "source": source,
+                "trades_source": trades_source,
+                "updated_at": datetime.now().isoformat(),
+                "bars": bars,
+                "trades": trades,
+            }
+
+        except ImportError:
+            logger.warning("DataFetcherManager 未找到，返回空分钟数据")
+            return {
+                "stock_code": stock_code,
+                "stock_name": stock_code,
+                "interval": interval,
+                "source": None,
+                "trades_source": None,
+                "updated_at": datetime.now().isoformat(),
+                "bars": [],
+                "trades": [],
+            }
+        except Exception as e:
+            logger.error(f"获取分钟数据失败: {e}", exc_info=True)
+            return {
+                "stock_code": stock_code,
+                "stock_name": stock_code,
+                "interval": interval,
+                "source": None,
+                "trades_source": None,
+                "updated_at": datetime.now().isoformat(),
+                "bars": [],
+                "trades": [],
+            }
+
     def _create_manager(self):
         """Create a data fetcher manager lazily to keep import costs local."""
         if self._manager_factory is not None:
