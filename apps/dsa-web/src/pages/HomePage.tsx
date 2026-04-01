@@ -1,7 +1,7 @@
 import type React from 'react';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import type { HistoryItem, AnalysisReport, TaskInfo } from '../types/analysis';
+import type { HistoryItem, TaskInfo } from '../types/analysis';
 import { historyApi } from '../api/history';
 import { analysisApi, DuplicateTaskError } from '../api/analysis';
 import { validateStockCode } from '../utils/validation';
@@ -11,18 +11,27 @@ import { ReportSummary } from '../components/report';
 import { HistoryList } from '../components/history';
 import { TaskPanel } from '../components/tasks';
 import { useTaskStream } from '../hooks';
+import { StockPriceDetailDrawer } from '../components/stocks/StockPriceDetailDrawer';
 
 /**
  * 首页 - 单页设计
  * 顶部输入 + 左侧历史 + 右侧报告
  */
 const HomePage: React.FC = () => {
-  const { setLoading, setError: setStoreError } = useAnalysisStore();
+  const {
+    setLoading,
+    setError: setStoreError,
+    draftStockCode,
+    setDraftStockCode,
+    priceDetailVisible,
+    setPriceDetailVisible,
+    historyReport,
+    setHistoryReport,
+  } = useAnalysisStore();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // 输入状态
-  const [stockCode, setStockCode] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [inputError, setInputError] = useState<string>();
 
@@ -35,13 +44,12 @@ const HomePage: React.FC = () => {
   const pageSize = 20;
 
   // 报告详情状态
-  const [selectedReport, setSelectedReport] = useState<AnalysisReport | null>(null);
   const [isLoadingReport, setIsLoadingReport] = useState(false);
-
   // 任务队列状态
   const [activeTasks, setActiveTasks] = useState<TaskInfo[]>([]);
   const [duplicateError, setDuplicateError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [restoredNoticeVisible, setRestoredNoticeVisible] = useState(false);
 
   // 用于跟踪当前分析请求，避免竞态条件
   const analysisRequestIdRef = useRef<number>(0);
@@ -81,7 +89,7 @@ const HomePage: React.FC = () => {
             historyApi.getDetail(task.taskId),
             fetchHistory(false, true, true),
           ]);
-          setSelectedReport(report);
+          setHistoryReport(report);
           setDuplicateError(null);
         } catch (err) {
           console.error('Failed to load completed report:', err);
@@ -109,8 +117,8 @@ const HomePage: React.FC = () => {
   currentPageRef.current = currentPage;
   const historyItemsRef = useRef(historyItems);
   historyItemsRef.current = historyItems;
-  const selectedReportRef = useRef(selectedReport);
-  selectedReportRef.current = selectedReport;
+  const selectedReportRef = useRef(historyReport);
+  selectedReportRef.current = historyReport;
 
   // 加载历史列表
   const fetchHistory = useCallback(async (autoSelectFirst = false, reset = true, silent = false) => {
@@ -168,7 +176,7 @@ const HomePage: React.FC = () => {
         setIsLoadingReport(true);
         try {
           const report = await historyApi.getDetail(firstItem.id);
-          setSelectedReport(report);
+          setHistoryReport(report);
         } catch (err) {
           console.error('Failed to fetch first report:', err);
         } finally {
@@ -199,11 +207,20 @@ const HomePage: React.FC = () => {
     const stock = searchParams.get('stock');
     if (!stock) return;
 
-    setStockCode(stock.toUpperCase());
+    setDraftStockCode(stock.toUpperCase());
     setInputError(undefined);
     setDuplicateError(null);
     setSearchParams({}, { replace: true });
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setDraftStockCode, setSearchParams]);
+
+  useEffect(() => {
+    if (!historyReport && !draftStockCode) return;
+    setRestoredNoticeVisible(true);
+    const timer = window.setTimeout(() => {
+      setRestoredNoticeVisible(false);
+    }, 2800);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   // Background polling: re-fetch history every 30s for CLI-initiated analyses
   useEffect(() => {
@@ -232,7 +249,7 @@ const HomePage: React.FC = () => {
     setIsLoadingReport(true);
     try {
       const report = await historyApi.getDetail(recordId);
-      setSelectedReport(report);
+      setHistoryReport(report);
     } catch (err) {
       console.error('Failed to fetch report:', err);
     } finally {
@@ -242,7 +259,7 @@ const HomePage: React.FC = () => {
 
   // 分析股票（异步模式）
   const handleAnalyze = async () => {
-    const { valid, message, normalized } = validateStockCode(stockCode);
+    const { valid, message, normalized } = validateStockCode(draftStockCode);
     if (!valid) {
       setInputError(message);
       return;
@@ -266,7 +283,7 @@ const HomePage: React.FC = () => {
 
       // 清空输入框
       if (currentRequestId === analysisRequestIdRef.current) {
-        setStockCode('');
+        setDraftStockCode('');
       }
 
       // 任务已提交，SSE 会推送更新
@@ -289,7 +306,7 @@ const HomePage: React.FC = () => {
 
   // 回车提交
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && stockCode && !isAnalyzing) {
+    if (e.key === 'Enter' && draftStockCode && !isAnalyzing) {
       handleAnalyze();
     }
   };
@@ -302,7 +319,7 @@ const HomePage: React.FC = () => {
         isLoading={isLoadingHistory}
         isLoadingMore={isLoadingMore}
         hasMore={hasMore}
-        selectedId={selectedReport?.meta.id}
+        selectedId={historyReport?.meta.id}
         onItemClick={(id) => { handleHistoryClick(id); setSidebarOpen(false); }}
         onLoadMore={handleLoadMore}
         className="max-h-[62vh] md:max-h-[62vh] flex-1 overflow-hidden"
@@ -333,9 +350,9 @@ const HomePage: React.FC = () => {
           <div className="flex-1 relative min-w-0">
             <input
               type="text"
-              value={stockCode}
+              value={draftStockCode}
               onChange={(e) => {
-                setStockCode(e.target.value.toUpperCase());
+                setDraftStockCode(e.target.value.toUpperCase());
                 setInputError(undefined);
               }}
               onKeyDown={handleKeyDown}
@@ -353,7 +370,7 @@ const HomePage: React.FC = () => {
           <button
             type="button"
             onClick={handleAnalyze}
-            disabled={!stockCode || isAnalyzing}
+            disabled={!draftStockCode || isAnalyzing}
             className="btn-primary flex items-center gap-1.5 whitespace-nowrap flex-shrink-0"
           >
             {isAnalyzing ? (
@@ -370,6 +387,14 @@ const HomePage: React.FC = () => {
           </button>
         </div>
       </header>
+
+      {restoredNoticeVisible ? (
+        <div className="md:col-start-2 md:col-end-5 mt-2 px-3 md:px-0">
+          <div className="rounded-xl border border-cyan/25 bg-cyan/10 px-4 py-2 text-sm text-cyan-100">
+            已恢复上次首页状态。
+          </div>
+        </div>
+      ) : null}
 
       {/* Desktop sidebar */}
       <div className="hidden md:flex col-start-2 row-start-2 flex-col gap-3 overflow-hidden min-h-0">
@@ -396,16 +421,16 @@ const HomePage: React.FC = () => {
             <div className="w-10 h-10 border-3 border-cyan/20 border-t-cyan rounded-full animate-spin" />
             <p className="mt-3 text-secondary text-sm">加载报告中...</p>
           </div>
-        ) : selectedReport ? (
+        ) : historyReport ? (
           <div className="max-w-4xl">
             {/* Follow-up button */}
-            <div className="flex items-center justify-end mb-2">
+            <div className="flex items-center justify-end gap-2 mb-2">
               <button
-                disabled={selectedReport.meta.id === undefined}
+                disabled={historyReport.meta.id === undefined}
                 onClick={() => {
-                  const code = selectedReport.meta.stockCode;
-                  const name = selectedReport.meta.stockName;
-                  const rid = selectedReport.meta.id!;
+                  const code = historyReport.meta.stockCode;
+                  const name = historyReport.meta.stockName;
+                  const rid = historyReport.meta.id!;
                   navigate(`/chat?stock=${encodeURIComponent(code)}&name=${encodeURIComponent(name)}&recordId=${rid}`);
                 }}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan/10 border border-cyan/20 text-cyan text-sm hover:bg-cyan/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -416,7 +441,11 @@ const HomePage: React.FC = () => {
                 追问 AI
               </button>
             </div>
-            <ReportSummary data={selectedReport} isHistory />
+            <ReportSummary
+              data={historyReport}
+              isHistory
+              onOpenPriceDetail={() => setPriceDetailVisible(true)}
+            />
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-center">
@@ -432,6 +461,17 @@ const HomePage: React.FC = () => {
           </div>
         )}
       </section>
+
+      <StockPriceDetailDrawer
+        isOpen={priceDetailVisible && Boolean(historyReport)}
+        stockCode={historyReport?.meta.stockCode}
+        stockName={historyReport?.meta.stockName}
+        onClose={() => setPriceDetailVisible(false)}
+        onOpenAiAnalysis={(code) => {
+          const params = new URLSearchParams({ stock: code });
+          navigate(`/?${params.toString()}`);
+        }}
+      />
     </div>
   );
 };

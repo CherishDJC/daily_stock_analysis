@@ -8,6 +8,7 @@ import { ReportDetails } from './ReportDetails';
 interface ReportSummaryProps {
   data: AnalysisResult | AnalysisReport;
   isHistory?: boolean;
+  onOpenPriceDetail?: (stockCode: string) => void;
 }
 
 /**
@@ -17,6 +18,7 @@ interface ReportSummaryProps {
 export const ReportSummary: React.FC<ReportSummaryProps> = ({
   data,
   isHistory = false,
+  onOpenPriceDetail,
 }) => {
   // 兼容 AnalysisResult 和 AnalysisReport 两种数据格式
   const report: AnalysisReport = 'report' in data ? data.report : data;
@@ -32,6 +34,7 @@ export const ReportSummary: React.FC<ReportSummaryProps> = ({
         meta={meta}
         summary={summary}
         isHistory={isHistory}
+        onOpenPriceDetail={onOpenPriceDetail}
       />
 
       {/* 策略点位区 */}

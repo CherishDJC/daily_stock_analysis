@@ -4,6 +4,7 @@ import { useAuth, useSystemConfig } from '../hooks';
 import {
   ChangePasswordCard,
   ImageStockExtractor,
+  PageStateCacheCard,
   SettingsAlert,
   SettingsField,
   SettingsLoading,
@@ -154,6 +155,12 @@ const SettingsPage: React.FC = () => {
             {activeCategory === 'system' && passwordChangeable ? (
               <div className="space-y-3">
                 <ChangePasswordCard />
+                <PageStateCacheCard />
+              </div>
+            ) : null}
+            {activeCategory === 'system' && !passwordChangeable ? (
+              <div className="space-y-3">
+                <PageStateCacheCard />
               </div>
             ) : null}
             {activeItems.length ? (

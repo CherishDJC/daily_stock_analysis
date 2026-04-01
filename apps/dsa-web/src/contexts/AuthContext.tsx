@@ -7,9 +7,13 @@ type AuthContextValue = {
   loggedIn: boolean;
   passwordSet: boolean;
   passwordChangeable: boolean;
+  fixedUsername: string | null;
+  humanVerificationEnabled: boolean;
+  humanVerificationProvider: string | null;
+  turnstileSiteKey: string | null;
   isLoading: boolean;
   loadError: string | null;
-  login: (password: string, passwordConfirm?: string) => Promise<{ success: boolean; error?: string }>;
+  login: (username: string, password: string, humanToken?: string) => Promise<{ success: boolean; error?: string }>;
   changePassword: (
     currentPassword: string,
     newPassword: string,
@@ -41,6 +45,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loggedIn, setLoggedIn] = useState(false);
   const [passwordSet, setPasswordSet] = useState(false);
   const [passwordChangeable, setPasswordChangeable] = useState(false);
+  const [fixedUsername, setFixedUsername] = useState<string | null>(null);
+  const [humanVerificationEnabled, setHumanVerificationEnabled] = useState(false);
+  const [humanVerificationProvider, setHumanVerificationProvider] = useState<string | null>(null);
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -53,12 +61,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoggedIn(status.loggedIn);
       setPasswordSet(status.passwordSet ?? false);
       setPasswordChangeable(status.passwordChangeable ?? false);
+      setFixedUsername(status.fixedUsername ?? null);
+      setHumanVerificationEnabled(status.humanVerificationEnabled ?? false);
+      setHumanVerificationProvider(status.humanVerificationProvider ?? null);
+      setTurnstileSiteKey(status.turnstileSiteKey ?? null);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Failed to load auth status');
       setAuthEnabled(false);
       setLoggedIn(false);
       setPasswordSet(false);
       setPasswordChangeable(false);
+      setFixedUsername(null);
+      setHumanVerificationEnabled(false);
+      setHumanVerificationProvider(null);
+      setTurnstileSiteKey(null);
     } finally {
       setIsLoading(false);
     }
@@ -70,11 +86,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (
+      username: string,
       password: string,
-      passwordConfirm?: string
+      humanToken?: string
     ): Promise<{ success: boolean; error?: string }> => {
       try {
-        await authApi.login(password, passwordConfirm);
+        await authApi.login(username, password, humanToken);
         setLoggedIn(true);
         return { success: true };
       } catch (err: unknown) {
@@ -120,6 +137,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loggedIn,
         passwordSet,
         passwordChangeable,
+        fixedUsername,
+        humanVerificationEnabled,
+        humanVerificationProvider,
+        turnstileSiteKey,
         isLoading,
         loadError,
         login,

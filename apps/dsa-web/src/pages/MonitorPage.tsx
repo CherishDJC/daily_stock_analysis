@@ -3,8 +3,9 @@ import { useCallback, useDeferredValue, useEffect, useRef, useState } from 'reac
 import { useNavigate } from 'react-router-dom';
 import { marketApi } from '../api/market';
 import { stocksApi } from '../api/stocks';
-import type { StockHistoryPoint, StockHistoryResponse, StockIntradayResponse, StockMinuteBar } from '../api/stocks';
+import type { StockHistoryPoint, StockHistoryResponse, StockIntradayResponse, StockMinuteBar, StockSearchResult } from '../api/stocks';
 import { Badge, Button, Card, Drawer, Select } from '../components/common';
+import { useMonitorStore } from '../stores';
 import type {
   MarketIndexSnapshot,
   MarketOverviewResponse,
@@ -1093,27 +1094,41 @@ const MonitorPage: React.FC = () => {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [search, setSearch] = useState('');
   const deferredSearch = useDeferredValue(search);
+  const [searchResults, setSearchResults] = useState<StockSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchRequestIdRef = useRef(0);
   const [sortKey, setSortKey] = useState<SortKey>('changePercent');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
-  const [selectedStock, setSelectedStock] = useState<Pick<MarketWatchlistItem, 'stockCode' | 'stockName'> | null>(null);
   const [selectedSector, setSelectedSector] = useState<SectorSnapshot | null>(null);
   const [sectorDrawerVisible, setSectorDrawerVisible] = useState(false);
   const [resumeSectorDrawerAfterDailyK, setResumeSectorDrawerAfterDailyK] = useState(false);
   const [sectorDetail, setSectorDetail] = useState<SectorConstituentResponse>(EMPTY_SECTOR_CONSTITUENTS);
   const [sectorDetailLoading, setSectorDetailLoading] = useState(false);
   const [sectorDetailError, setSectorDetailError] = useState<string | null>(null);
-  const [pricePanelViewMode, setPricePanelViewMode] = useState<PricePanelViewMode>('minute');
-  const [historyDays, setHistoryDays] = useState('60');
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyData, setHistoryData] = useState<StockHistoryResponse | null>(null);
   const [historyLoadedKey, setHistoryLoadedKey] = useState('');
-  const [minuteInterval, setMinuteInterval] = useState('1');
   const [intradayLoading, setIntradayLoading] = useState(false);
   const [intradayError, setIntradayError] = useState<string | null>(null);
   const [intradayData, setIntradayData] = useState<StockIntradayResponse | null>(null);
   const [intradayLoadedKey, setIntradayLoadedKey] = useState('');
-  const [historyFullscreen, setHistoryFullscreen] = useState(false);
+  const [restoredNoticeVisible, setRestoredNoticeVisible] = useState(false);
+  const {
+    selectedStock,
+    setSelectedStock,
+    pricePanelViewMode,
+    setPricePanelViewMode,
+    historyDays,
+    setHistoryDays,
+    minuteInterval,
+    setMinuteInterval,
+    historyFullscreen,
+    setHistoryFullscreen,
+    resetDetail,
+  } = useMonitorStore();
   const sessionStateRef = useRef<MarketSessionState | null>(null);
   const autoRefreshInitializedRef = useRef(false);
   const overviewRef = useRef<MarketOverviewResponse>(EMPTY_OVERVIEW);
@@ -1125,6 +1140,16 @@ const MonitorPage: React.FC = () => {
     overviewRef.current = overview;
   }, [overview]);
 
+  useEffect(() => {
+    if (!selectedStock) return;
+    setRestoredNoticeVisible(true);
+    const timer = window.setTimeout(() => {
+      setRestoredNoticeVisible(false);
+    }, 2800);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  // ---- Watchlist data fetching ----
   const fetchWatchlistOverview = useCallback(async (forceRefresh = false) => {
     setWatchlistLoading(true);
     try {
@@ -1144,6 +1169,54 @@ const MonitorPage: React.FC = () => {
 
   useEffect(() => {
     void fetchWatchlistOverview();
+  }, [fetchWatchlistOverview]);
+
+  // ---- Stock search ----
+  useEffect(() => {
+    const q = deferredSearch.trim();
+    const requestId = ++searchRequestIdRef.current;
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    if (!q) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      return;
+    }
+    setSearchLoading(true);
+    searchTimerRef.current = setTimeout(() => {
+      stocksApi.searchStocks(q, 8)
+        .then((results) => {
+          if (searchRequestIdRef.current === requestId) {
+            setSearchResults(results);
+          }
+        })
+        .catch(() => {
+          if (searchRequestIdRef.current === requestId) {
+            setSearchResults([]);
+          }
+        })
+        .finally(() => {
+          if (searchRequestIdRef.current === requestId) {
+            setSearchLoading(false);
+          }
+        });
+    }, 300);
+    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current); };
+  }, [deferredSearch]);
+
+  const handleAddToWatchlist = useCallback(async (code: string) => {
+    try {
+      await stocksApi.addToWatchlist([code]);
+      setSearch('');
+      setSearchResults([]);
+      await fetchWatchlistOverview(true);
+    } catch { /* ignore */ }
+  }, [fetchWatchlistOverview]);
+
+  const handleRemoveFromWatchlist = useCallback(async (code: string) => {
+    try {
+      await stocksApi.removeFromWatchlist(code);
+      await fetchWatchlistOverview(true);
+    } catch { /* ignore */ }
   }, [fetchWatchlistOverview]);
 
   const fetchSummaryOverview = useCallback(async (forceRefresh = false) => {
@@ -1390,7 +1463,7 @@ const MonitorPage: React.FC = () => {
     historyRequestIdRef.current += 1;
     intradayRequestIdRef.current += 1;
     setHistoryFullscreen(false);
-    setSelectedStock(null);
+    resetDetail();
     setHistoryError(null);
     setHistoryLoading(false);
     setHistoryData(null);
@@ -1403,7 +1476,7 @@ const MonitorPage: React.FC = () => {
       setSectorDrawerVisible(true);
       setResumeSectorDrawerAfterDailyK(false);
     }
-  }, [resumeSectorDrawerAfterDailyK, selectedSector]);
+  }, [resetDetail, resumeSectorDrawerAfterDailyK, selectedSector]);
 
   const openAiAnalysis = useCallback(() => {
     if (!selectedStock) return;
@@ -1446,6 +1519,12 @@ const MonitorPage: React.FC = () => {
 
   return (
     <div className="min-h-screen px-4 pb-6 pt-4 md:px-6">
+      {restoredNoticeVisible ? (
+        <div className="mb-4 rounded-xl border border-cyan/25 bg-cyan/10 px-4 py-2 text-sm text-cyan-100">
+          已恢复上次看盘详情状态。
+        </div>
+      ) : null}
+
       <header className="overflow-hidden rounded-[28px] border border-cyan/20 bg-[radial-gradient(circle_at_top_left,rgba(0,212,255,0.22),transparent_38%),linear-gradient(135deg,rgba(8,8,12,0.98),rgba(10,18,25,0.95))] p-5 shadow-[0_30px_90px_rgba(0,0,0,0.35)]">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div className="max-w-2xl">
@@ -1620,13 +1699,62 @@ const MonitorPage: React.FC = () => {
             </p>
           </div>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <input
-              type="text"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="搜索代码 / 名称 / 数据源"
-              className="w-full rounded-xl border border-white/10 bg-black/20 px-4 py-2.5 text-sm text-white outline-none transition placeholder:text-muted focus:border-cyan/40 sm:w-72"
-            />
+            <div className="relative">
+              <input
+                type="text"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                onFocus={() => setSearchFocused(true)}
+                onBlur={() => setTimeout(() => setSearchFocused(false), 200)}
+                placeholder="搜索添加自选股（代码/名称）"
+                className="w-full rounded-xl border border-white/10 bg-black/20 px-4 py-2.5 text-sm text-white outline-none transition placeholder:text-muted focus:border-cyan/40 sm:w-72"
+              />
+              {searchLoading && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                  <svg className="h-4 w-4 animate-spin text-muted" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                </div>
+              )}
+              {searchFocused && search.trim() && searchResults.length > 0 && (
+                <div className="absolute top-full left-0 z-50 mt-1 w-80 rounded-xl border border-white/10 bg-[#0a0f1a]/95 shadow-xl backdrop-blur-md">
+                  <div className="px-3 py-2 text-[11px] uppercase tracking-wider text-muted">
+                    搜索结果
+                  </div>
+                  {searchResults.map((item) => {
+                    const isInWatchlist = overview.watchlist.some((w) => w.stockCode === item.code);
+                    return (
+                      <button
+                        key={item.code}
+                        type="button"
+                        disabled={isInWatchlist}
+                        onClick={() => handleAddToWatchlist(item.code)}
+                        className={`flex w-full items-center justify-between px-3 py-2 text-sm transition last:rounded-b-xl ${
+                          isInWatchlist
+                            ? 'cursor-default text-muted'
+                            : 'text-white hover:bg-white/5'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{item.code}</span>
+                          <span className="text-secondary">{item.name}</span>
+                          {item.industry && <span className="text-xs text-muted">{item.industry}</span>}
+                        </div>
+                        <span className={`text-xs ${isInWatchlist ? 'text-muted' : 'text-cyan'}`}>
+                          {isInWatchlist ? '已添加' : '+ 添加'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {searchFocused && search.trim() && !searchLoading && searchResults.length === 0 && (
+                <div className="absolute top-full left-0 z-50 mt-1 w-80 rounded-xl border border-white/10 bg-[#0a0f1a]/95 px-3 py-4 text-center text-sm text-muted shadow-xl backdrop-blur-md">
+                  未找到匹配股票
+                </div>
+              )}
+            </div>
             <Button variant="secondary" onClick={() => navigate('/settings')}>
               去设置页
             </Button>
@@ -1755,16 +1883,31 @@ const MonitorPage: React.FC = () => {
                     <td className="px-3 py-3 text-sm text-secondary">{formatPlain(item.turnoverRate, 2, '%')}</td>
                     <td className="px-3 py-3 text-sm text-secondary">{formatAmount(item.amount)}</td>
                     <td className="rounded-r-2xl px-3 py-3">
-                      <div className="space-y-2">
-                        <Badge variant={item.source ? 'info' : 'default'}>{item.source || '--'}</Badge>
-                        <div className="h-2 overflow-hidden rounded-full bg-white/8">
-                          <div
-                            className={`h-full rounded-full ${
-                              item.status === 'error' ? 'bg-red-400/60' : 'bg-gradient-to-r from-cyan-400 to-emerald-400'
-                            }`}
-                            style={{ width: `${Math.max(8, Math.round((item.pricePosition ?? 0) * 100))}%` }}
-                          />
+                      <div className="flex items-center gap-2">
+                        <div className="space-y-2 flex-1">
+                          <Badge variant={item.source ? 'info' : 'default'}>{item.source || '--'}</Badge>
+                          <div className="h-2 overflow-hidden rounded-full bg-white/8">
+                            <div
+                              className={`h-full rounded-full ${
+                                item.status === 'error' ? 'bg-red-400/60' : 'bg-gradient-to-r from-cyan-400 to-emerald-400'
+                              }`}
+                              style={{ width: `${Math.max(8, Math.round((item.pricePosition ?? 0) * 100))}%` }}
+                            />
+                          </div>
                         </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleRemoveFromWatchlist(item.stockCode);
+                          }}
+                          className="shrink-0 rounded-lg p-1.5 text-muted transition hover:bg-red-500/10 hover:text-red-400"
+                          title="移出自选"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
                       </div>
                     </td>
                   </tr>

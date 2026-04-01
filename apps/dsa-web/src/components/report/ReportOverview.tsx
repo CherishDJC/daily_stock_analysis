@@ -7,6 +7,7 @@ interface ReportOverviewProps {
   meta: ReportMeta;
   summary: ReportSummaryType;
   isHistory?: boolean;
+  onOpenPriceDetail?: (stockCode: string) => void;
 }
 
 /**
@@ -14,7 +15,8 @@ interface ReportOverviewProps {
  */
 export const ReportOverview: React.FC<ReportOverviewProps> = ({
   meta,
-  summary
+  summary,
+  onOpenPriceDetail,
 }) => {
   const buildFallbackInsight = (): string => {
     const parts: string[] = [];
@@ -79,6 +81,19 @@ export const ReportOverview: React.FC<ReportOverviewProps> = ({
                   </span>
                 </div>
               </div>
+
+              {onOpenPriceDetail ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenPriceDetail(meta.stockCode)}
+                  className="ml-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-secondary text-sm hover:text-white hover:border-cyan/30 transition-colors flex-shrink-0"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 13.5h3l2-6 4 11 2-7h7" />
+                  </svg>
+                  行情详情
+                </button>
+              ) : null}
             </div>
 
             {/* 关键结论 */}

@@ -5,6 +5,11 @@ export type AuthStatusResponse = {
   loggedIn: boolean;
   passwordSet?: boolean;
   passwordChangeable?: boolean;
+  usernameRequired?: boolean;
+  fixedUsername?: string | null;
+  humanVerificationEnabled?: boolean;
+  humanVerificationProvider?: string | null;
+  turnstileSiteKey?: string | null;
 };
 
 export const authApi = {
@@ -13,10 +18,10 @@ export const authApi = {
     return data;
   },
 
-  async login(password: string, passwordConfirm?: string): Promise<void> {
-    const body: { password: string; passwordConfirm?: string } = { password };
-    if (passwordConfirm !== undefined) {
-      body.passwordConfirm = passwordConfirm;
+  async login(username: string, password: string, humanToken?: string): Promise<void> {
+    const body: { username: string; password: string; humanToken?: string } = { username, password };
+    if (humanToken !== undefined) {
+      body.humanToken = humanToken;
     }
     await apiClient.post('/api/v1/auth/login', body);
   },

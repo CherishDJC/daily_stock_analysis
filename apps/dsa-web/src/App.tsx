@@ -7,6 +7,7 @@ import SettingsPage from './pages/SettingsPage';
 import LoginPage from './pages/LoginPage';
 import NotFoundPage from './pages/NotFoundPage';
 import ChatPage from './pages/ChatPage';
+import ScreenerPage from './pages/ScreenerPage';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import './App.css';
 
@@ -37,6 +38,13 @@ const ChatIcon: React.FC<{ active?: boolean }> = ({active}) => (
     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={active ? 2 : 1.5}
               d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/>
+    </svg>
+);
+
+const ScreenerIcon: React.FC<{ active?: boolean }> = ({active}) => (
+    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={active ? 2 : 1.5}
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
     </svg>
 );
 
@@ -79,6 +87,12 @@ const NAV_ITEMS: DockItem[] = [
         label: '问股',
         to: '/chat',
         icon: ChatIcon,
+    },
+    {
+        key: 'screener',
+        label: '选股',
+        to: '/screener',
+        icon: ScreenerIcon,
     },
     {
         key: 'backtest',
@@ -190,6 +204,7 @@ const AppContent: React.FC = () => {
                     <Route path="/" element={<HomePage/>}/>
                     <Route path="/monitor" element={<MonitorPage/>}/>
                     <Route path="/chat" element={<ChatPage/>}/>
+                    <Route path="/screener" element={<ScreenerPage/>}/>
                     <Route path="/backtest" element={<BacktestPage/>}/>
                     <Route path="/settings" element={<SettingsPage/>}/>
                     <Route path="/login" element={<LoginPage/>}/>
