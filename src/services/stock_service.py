@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 class StockService:
     """
     股票数据服务
-    
+
     封装股票数据获取的业务逻辑
     """
-    
+
     def __init__(
         self,
         repo: Optional[StockRepository] = None,
@@ -39,28 +39,28 @@ class StockService:
         self._manager_factory = manager_factory
         self._today_provider = today_provider or date.today
         self._recent_refresh_days = max(1, recent_refresh_days)
-    
+
     def get_realtime_quote(self, stock_code: str) -> Optional[Dict[str, Any]]:
         """
         获取股票实时行情
-        
+
         Args:
             stock_code: 股票代码
-            
+
         Returns:
             实时行情数据字典
         """
         try:
             # 调用数据获取器获取实时行情
             from data_provider.base import DataFetcherManager
-            
+
             manager = DataFetcherManager()
             quote = manager.get_realtime_quote(stock_code)
-            
+
             if quote is None:
                 logger.warning(f"获取 {stock_code} 实时行情失败")
                 return None
-            
+
             # UnifiedRealtimeQuote 是 dataclass，使用 getattr 安全访问字段
             # 字段映射: UnifiedRealtimeQuote -> API 响应
             # - code -> stock_code
@@ -88,14 +88,14 @@ class StockService:
                 "amount": getattr(quote, "amount", None),
                 "update_time": datetime.now().isoformat(),
             }
-            
+
         except ImportError:
             logger.warning("DataFetcherManager 未找到，使用占位数据")
             return self._get_placeholder_quote(stock_code)
         except Exception as e:
             logger.error(f"获取实时行情失败: {e}", exc_info=True)
             return None
-    
+
     def get_history_data(
         self,
         stock_code: str,
@@ -104,15 +104,15 @@ class StockService:
     ) -> Dict[str, Any]:
         """
         获取股票历史行情
-        
+
         Args:
             stock_code: 股票代码
             period: K 线周期 (daily/weekly/monthly)
             days: 获取天数
-            
+
         Returns:
             历史行情数据字典
-            
+
         Raises:
             ValueError: 当 period 不是 daily 时抛出（weekly/monthly 暂未实现）
         """
@@ -122,23 +122,23 @@ class StockService:
                 f"暂不支持 '{period}' 周期，目前仅支持 'daily'。"
                 "weekly/monthly 聚合功能将在后续版本实现。"
             )
-        
+
         try:
             # 调用数据获取器获取历史数据
             manager = self._create_manager()
             df, source = self._get_cached_daily_history(manager, stock_code, days)
-            
+
             if df is None or df.empty:
                 logger.warning(f"获取 {stock_code} 历史数据失败")
                 return {"stock_code": stock_code, "period": period, "data": []}
-            
+
             # 获取股票名称
             try:
                 stock_name = manager.get_stock_name(stock_code)
             except Exception as e:
                 logger.warning("获取 %s 股票名称失败，回退为代码: %s", stock_code, e)
                 stock_name = stock_code
-            
+
             # 转换为响应格式
             data = []
             for _, row in df.iterrows():
@@ -147,7 +147,7 @@ class StockService:
                     date_str = date_val.strftime("%Y-%m-%d")
                 else:
                     date_str = str(date_val)
-                
+
                 data.append({
                     "date": date_str,
                     "open": self._to_float(row.get("open"), default=0.0),
@@ -158,14 +158,14 @@ class StockService:
                     "amount": self._to_float(row.get("amount")),
                     "change_percent": self._to_float(row.get("pct_chg")),
                 })
-            
+
             return {
                 "stock_code": stock_code,
                 "stock_name": stock_name,
                 "period": period,
                 "data": data,
             }
-            
+
         except ImportError:
             logger.warning("DataFetcherManager 未找到，返回空数据")
             return {"stock_code": stock_code, "period": period, "data": []}
@@ -278,6 +278,162 @@ class StockService:
                 "bars": [],
                 "trades": [],
             }
+
+    def get_fund_flow_data(
+        self,
+        stock_code: str,
+        limit: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        获取个股主力资金流向明细。
+
+        Args:
+            stock_code: 股票代码
+            limit: 返回最近多少条记录
+
+        Returns:
+            资金流明细响应字典
+        """
+        try:
+            import akshare as ak
+
+            market = self._resolve_cn_market(stock_code)
+            raw_df = ak.stock_individual_fund_flow(stock=stock_code, market=market)
+            if raw_df is None or raw_df.empty:
+                return {
+                    "stock_code": stock_code,
+                    "stock_name": stock_code,
+                    "source": "AkShare",
+                    "updated_at": datetime.now().isoformat(),
+                    "data": [],
+                }
+
+            try:
+                stock_name = self._create_manager().get_stock_name(stock_code)
+            except Exception as e:
+                logger.warning("获取 %s 股票名称失败，回退为代码: %s", stock_code, e)
+                stock_name = stock_code
+
+            normalized = raw_df.copy()
+            if "日期" in normalized.columns:
+                normalized["日期"] = pd.to_datetime(normalized["日期"], errors="coerce")
+                normalized = normalized.dropna(subset=["日期"]).sort_values("日期", ascending=False)
+            normalized = normalized.head(limit)
+
+            data = []
+            for _, row in normalized.iterrows():
+                trade_date = row.get("日期")
+                if hasattr(trade_date, "strftime"):
+                    date_str = trade_date.strftime("%Y-%m-%d")
+                else:
+                    date_str = str(trade_date)
+
+                data.append(
+                    {
+                        "date": date_str,
+                        "close": self._to_float(row.get("收盘价")),
+                        "change_percent": self._to_float(row.get("涨跌幅")),
+                        "main_net_inflow": self._to_float(row.get("主力净流入-净额")),
+                        "main_net_inflow_ratio": self._to_float(row.get("主力净流入-净占比")),
+                        "super_large_net_inflow": self._to_float(row.get("超大单净流入-净额")),
+                        "super_large_net_inflow_ratio": self._to_float(row.get("超大单净流入-净占比")),
+                        "large_net_inflow": self._to_float(row.get("大单净流入-净额")),
+                        "large_net_inflow_ratio": self._to_float(row.get("大单净流入-净占比")),
+                        "medium_net_inflow": self._to_float(row.get("中单净流入-净额")),
+                        "medium_net_inflow_ratio": self._to_float(row.get("中单净流入-净占比")),
+                        "small_net_inflow": self._to_float(row.get("小单净流入-净额")),
+                        "small_net_inflow_ratio": self._to_float(row.get("小单净流入-净占比")),
+                    }
+                )
+
+            return {
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "source": "AkShare",
+                "updated_at": datetime.now().isoformat(),
+                "data": data,
+            }
+        except ImportError:
+            logger.warning("AkShare 未安装，返回空资金流数据")
+            return {
+                "stock_code": stock_code,
+                "stock_name": stock_code,
+                "source": None,
+                "updated_at": datetime.now().isoformat(),
+                "data": [],
+            }
+        except Exception as e:
+            logger.error(f"获取资金流向失败: {e}", exc_info=True)
+            return {
+                "stock_code": stock_code,
+                "stock_name": stock_code,
+                "source": None,
+                "updated_at": datetime.now().isoformat(),
+                "data": [],
+            }
+
+    def get_stock_meta_data(self, stock_code: str) -> Dict[str, Any]:
+        """
+        获取股票基础信息与所属板块摘要。
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            基础信息响应字典
+        """
+        manager = self._create_manager()
+
+        try:
+            stock_name = manager.get_stock_name(stock_code)
+        except Exception as e:
+            logger.warning("获取 %s 股票名称失败，回退为代码: %s", stock_code, e)
+            stock_name = stock_code
+
+        info: Dict[str, Any] = {}
+        boards: list[str] = []
+        source: Optional[str] = None
+
+        try:
+            raw_info = manager.get_base_info(stock_code) or {}
+            if isinstance(raw_info, dict):
+                info = raw_info
+                source = str(raw_info.get("source") or source or "").strip() or None
+        except Exception as e:
+            logger.warning("获取 %s 基础信息失败，降级为空: %s", stock_code, e)
+
+        try:
+            board_df = manager.get_belong_board(stock_code)
+            if board_df is not None and not board_df.empty:
+                boards = self._extract_board_names(board_df)
+        except Exception as e:
+            logger.warning("获取 %s 所属板块失败，降级为空: %s", stock_code, e)
+
+        return {
+            "stock_code": stock_code,
+            "stock_name": self._first_non_empty(
+                stock_name,
+                info.get("name"),
+                info.get("股票名称"),
+            ) or stock_code,
+            "source": source,
+            "updated_at": datetime.now().isoformat(),
+            "industry": self._first_non_empty(info.get("industry"), info.get("行业"), info.get("所属行业")),
+            "market": self._first_non_empty(info.get("market"), info.get("市场"), info.get("exchange"), info.get("交易所")),
+            "area": self._first_non_empty(info.get("area"), info.get("地域"), info.get("province"), info.get("省份")),
+            "list_date": self._normalize_date_value(
+                self._first_non_empty(info.get("list_date"), info.get("上市日期"), info.get("found_date"), info.get("setup_date"))
+            ),
+            "full_name": self._first_non_empty(info.get("fullname"), info.get("full_name"), info.get("公司名称"), info.get("name")),
+            "website": self._first_non_empty(info.get("website"), info.get("公司网站")),
+            "main_business": self._first_non_empty(info.get("main_business"), info.get("主营业务"), info.get("business_scope")),
+            "employees": self._to_int(info.get("employees"), default=None),
+            "pe_ratio": self._to_float(self._first_non_empty(info.get("pe_ratio"), info.get("市盈率"), info.get("市盈率(动态)"))),
+            "pb_ratio": self._to_float(self._first_non_empty(info.get("pb_ratio"), info.get("市净率"), info.get("市净率MRQ"))),
+            "total_market_value": self._to_float(self._first_non_empty(info.get("total_mv"), info.get("总市值"))),
+            "circulating_market_value": self._to_float(self._first_non_empty(info.get("circ_mv"), info.get("流通市值"))),
+            "belong_boards": boards,
+        }
 
     def _create_manager(self):
         """Create a data fetcher manager lazily to keep import costs local."""
@@ -405,14 +561,75 @@ class StockService:
         except TypeError:
             pass
         return float(value)
-    
+
+    @staticmethod
+    def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+        if value is None:
+            return default
+        try:
+            if pd.isna(value):
+                return default
+        except TypeError:
+            pass
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _first_non_empty(*values: Any) -> Any:
+        for value in values:
+            if value in (None, "", [], {}):
+                continue
+            return value
+        return None
+
+    @staticmethod
+    def _normalize_date_value(value: Any) -> Optional[str]:
+        if value in (None, "", [], {}):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if len(text) == 8 and text.isdigit():
+            return f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
+        return text
+
+    @staticmethod
+    def _extract_board_names(board_df: pd.DataFrame) -> list[str]:
+        names: list[str] = []
+        if board_df is None or board_df.empty:
+            return names
+
+        for _, row in board_df.iterrows():
+            for key in row.index:
+                key_text = str(key)
+                if "板块" in key_text or "名称" in key_text:
+                    value = row.get(key)
+                    if value not in (None, ""):
+                        board_name = str(value).strip()
+                        if board_name and board_name not in names:
+                            names.append(board_name)
+                    break
+        return names[:10]
+
+    @staticmethod
+    def _resolve_cn_market(stock_code: str) -> str:
+        """Infer exchange code for Eastmoney-style CN stock APIs."""
+        code = (stock_code or "").strip()
+        if code.startswith("6"):
+            return "sh"
+        if code.startswith(("4", "8")) or code[:2] in {"43", "83", "87", "88", "92"}:
+            return "bj"
+        return "sz"
+
     def _get_placeholder_quote(self, stock_code: str) -> Dict[str, Any]:
         """
         获取占位行情数据（用于测试）
-        
+
         Args:
             stock_code: 股票代码
-            
+
         Returns:
             占位行情数据
         """

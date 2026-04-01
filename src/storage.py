@@ -379,6 +379,60 @@ class ConversationMessage(Base):
     created_at = Column(DateTime, default=datetime.now, index=True)
 
 
+class ScreenerResult(Base):
+    """选股结果历史记录"""
+    __tablename__ = 'screener_results'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query = Column(Text, nullable=False)
+    conditions_json = Column(Text)
+    results_json = Column(Text)
+    result_count = Column(Integer, default=0)
+    strategy_summary = Column(Text)
+    risk_warning = Column(Text)
+    total_steps = Column(Integer)
+    total_tokens = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'query': self.query,
+            'result_count': self.result_count,
+            'strategy_summary': self.strategy_summary,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class AuthAuditLog(Base):
+    """Authentication and authorization audit log."""
+
+    __tablename__ = 'auth_audit_logs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_type = Column(String(32), nullable=False, index=True)
+    username = Column(String(128), index=True)
+    ip = Column(String(64), index=True)
+    path = Column(String(255))
+    user_agent = Column(String(512))
+    success = Column(Boolean)
+    detail = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+
+class AuthRateLimitState(Base):
+    """Persistent login failure counter for IP-based rate limiting."""
+
+    __tablename__ = 'auth_rate_limit_states'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ip = Column(String(64), nullable=False, unique=True, index=True)
+    failure_count = Column(Integer, nullable=False, default=0)
+    first_failure_at = Column(DateTime, nullable=False, index=True)
+    last_failure_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
 class ReferenceDataCache(Base):
     """
     Reference data cache table for low-churn external metadata.
@@ -1463,6 +1517,269 @@ class DatabaseManager:
                 )
             )
             return result.rowcount
+
+    # ------------------------------------------------------------------
+    # Screener results
+    # ------------------------------------------------------------------
+
+    def save_screener_result(
+        self,
+        query: str,
+        results_json: str,
+        result_count: int = 0,
+        strategy_summary: Optional[str] = None,
+        risk_warning: Optional[str] = None,
+        conditions_json: Optional[str] = None,
+        total_steps: int = 0,
+        total_tokens: int = 0,
+    ) -> int:
+        """Save a screener result to the database.
+
+        Returns:
+            The id of the newly created record.
+        """
+        with self.session_scope() as session:
+            record = ScreenerResult(
+                query=query,
+                conditions_json=conditions_json,
+                results_json=results_json,
+                result_count=result_count,
+                strategy_summary=strategy_summary,
+                risk_warning=risk_warning,
+                total_steps=total_steps,
+                total_tokens=total_tokens,
+            )
+            session.add(record)
+            session.flush()
+            return record.id
+
+    def get_screener_history(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Get recent screener results (metadata only, no full JSON)."""
+        with self.session_scope() as session:
+            rows = session.execute(
+                select(
+                    ScreenerResult.id,
+                    ScreenerResult.query,
+                    ScreenerResult.result_count,
+                    ScreenerResult.strategy_summary,
+                    ScreenerResult.results_json,
+                    ScreenerResult.created_at,
+                )
+                .order_by(desc(ScreenerResult.created_at))
+                .limit(limit)
+                .offset(offset)
+            ).fetchall()
+
+            records = []
+            for r in rows:
+                status = None
+                provider = None
+                error_message = None
+                if r.results_json:
+                    try:
+                        payload = json.loads(r.results_json)
+                    except (json.JSONDecodeError, TypeError):
+                        payload = None
+                    if isinstance(payload, dict):
+                        status = payload.get("status")
+                        provider = payload.get("provider")
+                        error_message = payload.get("error_message")
+
+                records.append(
+                    {
+                        "id": r.id,
+                        "query": r.query,
+                        "result_count": r.result_count,
+                        "strategy_summary": r.strategy_summary,
+                        "status": status,
+                        "provider": provider,
+                        "error_message": error_message,
+                        "created_at": r.created_at.isoformat() if r.created_at else None,
+                    }
+                )
+
+            return records
+
+    def get_screener_detail(self, record_id: int) -> Optional[Dict[str, Any]]:
+        """Get full screener result by id."""
+        with self.session_scope() as session:
+            record = session.get(ScreenerResult, record_id)
+            if record is None:
+                return None
+
+            payload_data: Any = None
+            dashboard_data = None
+            results_data = None
+            report_markdown = None
+            status = None
+            provider = None
+            error_message = None
+            if record.results_json:
+                try:
+                    payload_data = json.loads(record.results_json)
+                except (json.JSONDecodeError, TypeError):
+                    payload_data = record.results_json
+
+            if isinstance(payload_data, dict):
+                dashboard_data = payload_data.get("dashboard")
+                results_data = payload_data.get("results")
+                report_markdown = payload_data.get("report_markdown")
+                status = payload_data.get("status")
+                provider = payload_data.get("provider")
+                error_message = payload_data.get("error_message")
+                if results_data is None and isinstance(dashboard_data, dict):
+                    results_data = dashboard_data.get("results")
+            else:
+                results_data = payload_data
+
+            conditions_data = None
+            if record.conditions_json:
+                try:
+                    conditions_data = json.loads(record.conditions_json)
+                except (json.JSONDecodeError, TypeError):
+                    conditions_data = record.conditions_json
+
+            return {
+                "id": record.id,
+                "query": record.query,
+                "conditions": conditions_data,
+                "dashboard": dashboard_data,
+                "results": results_data,
+                "report_markdown": report_markdown,
+                "result_count": record.result_count,
+                "strategy_summary": record.strategy_summary,
+                "risk_warning": record.risk_warning,
+                "status": status,
+                "provider": provider,
+                "error_message": error_message,
+                "total_steps": record.total_steps,
+                "total_tokens": record.total_tokens,
+                "created_at": record.created_at.isoformat() if record.created_at else None,
+            }
+
+    def delete_screener_result(self, record_id: int) -> bool:
+        """Delete a screener result by id."""
+        with self.session_scope() as session:
+            result = session.execute(
+                delete(ScreenerResult).where(ScreenerResult.id == record_id)
+            )
+            return result.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Auth audit & rate limit
+    # ------------------------------------------------------------------
+
+    def save_auth_audit_log(
+        self,
+        event_type: str,
+        ip: str,
+        username: Optional[str] = None,
+        path: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        success: Optional[bool] = None,
+        detail: Optional[str] = None,
+    ) -> int:
+        """Persist an authentication-related audit log entry."""
+        with self.session_scope() as session:
+            record = AuthAuditLog(
+                event_type=event_type,
+                ip=ip,
+                username=username,
+                path=path,
+                user_agent=user_agent,
+                success=success,
+                detail=detail,
+            )
+            session.add(record)
+            session.flush()
+            return record.id
+
+    def get_auth_audit_logs(
+        self,
+        limit: int = 100,
+        event_type: Optional[str] = None,
+        ip: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return recent auth audit log entries."""
+        with self.session_scope() as session:
+            stmt = select(AuthAuditLog).order_by(desc(AuthAuditLog.created_at)).limit(limit)
+            if event_type:
+                stmt = stmt.where(AuthAuditLog.event_type == event_type)
+            if ip:
+                stmt = stmt.where(AuthAuditLog.ip == ip)
+
+            rows = session.execute(stmt).scalars().all()
+            return [
+                {
+                    "id": row.id,
+                    "event_type": row.event_type,
+                    "username": row.username,
+                    "ip": row.ip,
+                    "path": row.path,
+                    "user_agent": row.user_agent,
+                    "success": row.success,
+                    "detail": row.detail,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+
+    def is_auth_rate_limited(self, ip: str, window_sec: int, max_failures: int) -> bool:
+        """Return whether the IP has exceeded failed-login attempts within the window."""
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=window_sec)
+
+        with self.session_scope() as session:
+            row = session.execute(
+                select(AuthRateLimitState).where(AuthRateLimitState.ip == ip)
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+
+            if row.first_failure_at < cutoff:
+                session.delete(row)
+                return False
+
+            return row.failure_count >= max_failures
+
+    def record_auth_failure(self, ip: str, window_sec: int) -> None:
+        """Persist a failed-login attempt for the given IP."""
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=window_sec)
+
+        with self.session_scope() as session:
+            row = session.execute(
+                select(AuthRateLimitState).where(AuthRateLimitState.ip == ip)
+            ).scalar_one_or_none()
+
+            if row is None or row.first_failure_at < cutoff:
+                if row is not None:
+                    session.delete(row)
+                    session.flush()
+                row = AuthRateLimitState(
+                    ip=ip,
+                    failure_count=1,
+                    first_failure_at=now,
+                    last_failure_at=now,
+                )
+                session.add(row)
+                return
+
+            row.failure_count += 1
+            row.last_failure_at = now
+
+    def clear_auth_failures(self, ip: str) -> None:
+        """Clear persistent failed-login state for the IP after success."""
+        with self.session_scope() as session:
+            row = session.execute(
+                select(AuthRateLimitState).where(AuthRateLimitState.ip == ip)
+            ).scalar_one_or_none()
+            if row is not None:
+                session.delete(row)
 
 
 # 便捷函数

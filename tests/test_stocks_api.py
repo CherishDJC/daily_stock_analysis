@@ -62,6 +62,48 @@ class StocksApiTestCase(unittest.TestCase):
                 }
             ],
         }
+        self.service.get_fund_flow_data.return_value = {
+            "stock_code": "301428",
+            "stock_name": "世纪恒通",
+            "source": "AkShare",
+            "updated_at": "2026-03-19T11:35:00+08:00",
+            "data": [
+                {
+                    "date": "2026-03-18",
+                    "close": 39.01,
+                    "change_percent": 2.34,
+                    "main_net_inflow": 23456789.0,
+                    "main_net_inflow_ratio": 6.78,
+                    "super_large_net_inflow": 13456789.0,
+                    "super_large_net_inflow_ratio": 3.82,
+                    "large_net_inflow": 10000000.0,
+                    "large_net_inflow_ratio": 2.96,
+                    "medium_net_inflow": -7654321.0,
+                    "medium_net_inflow_ratio": -2.21,
+                    "small_net_inflow": -15802468.0,
+                    "small_net_inflow_ratio": -4.57,
+                }
+            ],
+        }
+        self.service.get_stock_meta_data.return_value = {
+            "stock_code": "301428",
+            "stock_name": "世纪恒通",
+            "source": "tushare",
+            "updated_at": "2026-03-19T11:35:00+08:00",
+            "industry": "软件服务",
+            "market": "创业板",
+            "area": "贵州",
+            "list_date": "20230119",
+            "full_name": "世纪恒通科技股份有限公司",
+            "website": "https://example.com",
+            "main_business": "数字信息服务",
+            "employees": 666,
+            "pe_ratio": 25.6,
+            "pb_ratio": 3.2,
+            "total_market_value": 5_600_000_000.0,
+            "circulating_market_value": 4_300_000_000.0,
+            "belong_boards": ["人工智能", "数据要素"],
+        }
 
         self.service_patcher = patch("api.v1.endpoints.stocks.StockService", return_value=self.service)
         self.service_patcher.start()
@@ -95,6 +137,29 @@ class StocksApiTestCase(unittest.TestCase):
     def test_stock_intraday_rejects_unsupported_interval(self) -> None:
         response = self.client.get("/api/v1/stocks/301428/intraday?interval=2")
         self.assertEqual(response.status_code, 422)
+
+    def test_stock_fund_flow_returns_recent_rows(self) -> None:
+        response = self.client.get("/api/v1/stocks/301428/fund-flow?limit=5")
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["stock_code"], "301428")
+        self.assertEqual(payload["source"], "AkShare")
+        self.assertEqual(payload["data"][0]["main_net_inflow"], 23456789.0)
+        self.service.get_fund_flow_data.assert_called_once_with(
+            stock_code="301428",
+            limit=5,
+        )
+
+    def test_stock_meta_returns_basic_info(self) -> None:
+        response = self.client.get("/api/v1/stocks/301428/meta")
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["stock_code"], "301428")
+        self.assertEqual(payload["industry"], "软件服务")
+        self.assertEqual(payload["belong_boards"], ["人工智能", "数据要素"])
+        self.service.get_stock_meta_data.assert_called_once_with(stock_code="301428")
 
 
 if __name__ == "__main__":

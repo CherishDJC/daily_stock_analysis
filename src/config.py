@@ -661,6 +661,58 @@ class Config:
             stock_list = ['000001']
 
         self.stock_list = stock_list
+
+    def add_stocks(self, codes: List[str]) -> int:
+        """添加股票到自选股列表，返回实际新增数量。"""
+        existing = set(self.stock_list)
+        added = []
+        for code in codes:
+            code = code.strip().upper()
+            if code and code not in existing:
+                added.append(code)
+                existing.add(code)
+        if added:
+            self.stock_list = self.stock_list + added
+            self._persist_stock_list()
+        return len(added)
+
+    def remove_stock(self, code: str) -> bool:
+        """从自选股列表移除股票，返回是否成功移除。"""
+        code = code.strip().upper()
+        if code in self.stock_list:
+            self.stock_list = [c for c in self.stock_list if c != code]
+            self._persist_stock_list()
+            return True
+        return False
+
+    def _persist_stock_list(self) -> None:
+        """将 stock_list 持久化写入 .env 文件。"""
+        env_file = os.getenv("ENV_FILE")
+        env_path = Path(env_file) if env_file else (Path(__file__).parent.parent / '.env')
+
+        if not env_path.exists():
+            return
+
+        # Read current .env content
+        lines = env_path.read_text(encoding='utf-8').splitlines()
+
+        stock_list_str = ','.join(self.stock_list)
+        found = False
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('STOCK_LIST=') or stripped.startswith('STOCK_LIST ='):
+                # Preserve surrounding quotes if the original value used them
+                key_part = stripped.split('=', 1)[0].strip()
+                new_lines.append(f'{key_part}={stock_list_str}')
+                found = True
+            else:
+                new_lines.append(line)
+
+        if not found:
+            new_lines.append(f'STOCK_LIST={stock_list_str}')
+
+        env_path.write_text('\n'.join(new_lines) + '\n', encoding='utf-8')
     
     def validate(self) -> List[str]:
         """

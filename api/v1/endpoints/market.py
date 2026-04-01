@@ -9,16 +9,84 @@
 """
 
 import logging
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.market import MarketOverviewResponse, SectorConstituentResponse
 from src.services.market_monitor_service import get_market_monitor_service
+from src.config import get_config
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ============================================================
+# Watchlist management
+# ============================================================
+
+class WatchlistAddBody(BaseModel):
+    codes: List[str] = Field(..., description="要添加的股票代码列表")
+
+
+class WatchlistAddResponse(BaseModel):
+    added: int = Field(..., description="实际新增数量")
+    watchlist_total: int = Field(..., description="自选股总数")
+
+
+class WatchlistRemoveResponse(BaseModel):
+    removed: str = Field(..., description="被移除的股票代码")
+    watchlist_total: int = Field(..., description="自选股总数")
+
+
+class WatchlistResponse(BaseModel):
+    codes: List[str] = Field(..., description="当前自选股代码列表")
+
+
+@router.get(
+    "/watchlist",
+    response_model=WatchlistResponse,
+    summary="获取自选股列表",
+    description="返回当前自选股中的所有股票代码。",
+)
+def get_watchlist() -> WatchlistResponse:
+    config = get_config()
+    return WatchlistResponse(codes=config.stock_list)
+
+
+@router.post(
+    "/watchlist",
+    response_model=WatchlistAddResponse,
+    summary="添加股票到自选股",
+    description="将股票代码添加到自选股列表，自动去重。",
+)
+def add_to_watchlist(request: WatchlistAddBody) -> WatchlistAddResponse:
+    config = get_config()
+    added = config.add_stocks(request.codes)
+    return WatchlistAddResponse(
+        added=added,
+        watchlist_total=len(config.stock_list),
+    )
+
+
+@router.delete(
+    "/watchlist/{code}",
+    response_model=WatchlistRemoveResponse,
+    summary="从自选股移除",
+    description="从自选股列表中移除指定股票代码。",
+)
+def remove_from_watchlist(code: str) -> WatchlistRemoveResponse:
+    config = get_config()
+    removed = config.remove_stock(code)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"股票 {code} 不在自选股中")
+    return WatchlistRemoveResponse(
+        removed=code,
+        watchlist_total=len(config.stock_list),
+    )
 
 
 @router.get(

@@ -12,18 +12,23 @@
 """
 
 import logging
-from typing import Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from api.v1.schemas.stocks import (
     ExtractFromImageResponse,
+    FundFlowData,
     IntradayTradeData,
     KLineData,
     MinuteBarData,
+    StockFundFlowResponse,
     StockHistoryResponse,
     StockIntradayResponse,
+    StockMetaResponse,
     StockQuote,
+    StockSearchResponse,
+    StockSearchResult,
 )
 from api.v1.schemas.common import ErrorResponse
 from src.services.image_stock_extractor import (
@@ -113,6 +118,109 @@ def extract_from_image(
         )
 
 
+# In-memory cache for stock list (loaded once, refreshed every 24h)
+_stock_list_cache: Optional[List[Dict[str, Optional[str]]]] = None
+_stock_list_cache_time: float = 0
+_STOCK_LIST_CACHE_TTL = 24 * 3600  # 24 hours
+
+
+def _load_stock_list() -> List[Dict[str, Optional[str]]]:
+    """Load A-share stock list with caching."""
+    global _stock_list_cache, _stock_list_cache_time
+
+    import time
+
+    now = time.time()
+    if _stock_list_cache is not None and (now - _stock_list_cache_time) < _STOCK_LIST_CACHE_TTL:
+        return _stock_list_cache
+
+    df = None
+
+    # 1. AkShare stock_info_a_code_name (fast, free, no token)
+    try:
+        import akshare as ak
+        df = ak.stock_info_a_code_name()
+        if df is not None and not df.empty:
+            col_map = {}
+            if "code" not in df.columns and "代码" in df.columns:
+                col_map["代码"] = "code"
+            if "name" not in df.columns and "名称" in df.columns:
+                col_map["名称"] = "name"
+            if col_map:
+                df = df.rename(columns=col_map)
+    except Exception as e:
+        logger.debug(f"akshare stock_info_a_code_name 失败: {e}")
+
+    # 2. Fallback: DataFetcherManager (slow, needs Tushare/Baostock)
+    if df is None or (hasattr(df, 'empty') and df.empty):
+        try:
+            from data_provider import DataFetcherManager
+            manager = DataFetcherManager()
+            df = manager.get_stock_list()
+        except Exception as e:
+            logger.debug(f"DataFetcherManager.get_stock_list 失败: {e}")
+
+    if df is None or (hasattr(df, 'empty') and df.empty):
+        return _stock_list_cache or []
+
+    records = []
+    for _, row in df.iterrows():
+        records.append({
+            "code": str(row.get("code", "")).strip(),
+            "name": str(row.get("name", "")).strip(),
+            "industry": str(row.get("industry", "")).strip() or None,
+        })
+
+    _stock_list_cache = records
+    _stock_list_cache_time = now
+    logger.info(f"股票列表缓存已更新: {len(records)} 条")
+    return records
+
+
+@router.get(
+    "/search",
+    response_model=StockSearchResponse,
+    responses={
+        200: {"description": "搜索结果"},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="搜索股票",
+    description="按代码或名称模糊搜索 A 股股票，返回匹配的股票列表。",
+)
+def search_stocks(
+    q: str = Query(..., min_length=1, description="搜索关键词（代码或名称）"),
+    limit: int = Query(10, ge=1, le=20, description="最大返回条数"),
+) -> StockSearchResponse:
+    """模糊搜索 A 股股票。"""
+    try:
+        stock_list = _load_stock_list()
+        if not stock_list:
+            return StockSearchResponse(results=[])
+
+        query_lower = q.lower()
+        results = []
+        for item in stock_list:
+            if query_lower in item["code"].lower() or query_lower in item["name"].lower():
+                results.append(
+                    StockSearchResult(
+                        code=item["code"],
+                        name=item["name"],
+                        industry=item.get("industry"),
+                    )
+                )
+                if len(results) >= limit:
+                    break
+
+        return StockSearchResponse(results=results)
+
+    except Exception as e:
+        logger.error(f"股票搜索失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"搜索失败: {str(e)}"},
+        )
+
+
 @router.get(
     "/{stock_code}/quote",
     response_model=StockQuote,
@@ -127,24 +235,24 @@ def extract_from_image(
 def get_stock_quote(stock_code: str) -> StockQuote:
     """
     获取股票实时行情
-    
+
     获取指定股票的最新行情数据
-    
+
     Args:
         stock_code: 股票代码（如 600519、00700、AAPL）
-        
+
     Returns:
         StockQuote: 实时行情数据
-        
+
     Raises:
         HTTPException: 404 - 股票不存在
     """
     try:
         service = StockService()
-        
+
         # 使用 def 而非 async def，FastAPI 自动在线程池中执行
         result = service.get_realtime_quote(stock_code)
-        
+
         if result is None:
             raise HTTPException(
                 status_code=404,
@@ -153,7 +261,7 @@ def get_stock_quote(stock_code: str) -> StockQuote:
                     "message": f"未找到股票 {stock_code} 的行情数据"
                 }
             )
-        
+
         return StockQuote(
             stock_code=result.get("stock_code", stock_code),
             stock_name=result.get("stock_name"),
@@ -168,7 +276,7 @@ def get_stock_quote(stock_code: str) -> StockQuote:
             amount=result.get("amount"),
             update_time=result.get("update_time")
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -179,6 +287,51 @@ def get_stock_quote(stock_code: str) -> StockQuote:
                 "error": "internal_error",
                 "message": f"获取实时行情失败: {str(e)}"
             }
+        )
+
+
+@router.get(
+    "/{stock_code}/meta",
+    response_model=StockMetaResponse,
+    responses={
+        200: {"description": "股票基础信息"},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="获取股票基础信息",
+    description="获取指定股票的基础信息、所属行业与所属板块摘要",
+)
+def get_stock_meta(stock_code: str) -> StockMetaResponse:
+    """获取股票基础信息摘要。"""
+    try:
+        service = StockService()
+        result = service.get_stock_meta_data(stock_code=stock_code)
+        return StockMetaResponse(
+            stock_code=stock_code,
+            stock_name=result.get("stock_name"),
+            source=result.get("source"),
+            updated_at=result.get("updated_at"),
+            industry=result.get("industry"),
+            market=result.get("market"),
+            area=result.get("area"),
+            list_date=result.get("list_date"),
+            full_name=result.get("full_name"),
+            website=result.get("website"),
+            main_business=result.get("main_business"),
+            employees=result.get("employees"),
+            pe_ratio=result.get("pe_ratio"),
+            pb_ratio=result.get("pb_ratio"),
+            total_market_value=result.get("total_market_value"),
+            circulating_market_value=result.get("circulating_market_value"),
+            belong_boards=result.get("belong_boards") or [],
+        )
+    except Exception as e:
+        logger.error(f"获取基础信息失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"获取基础信息失败: {str(e)}",
+            },
         )
 
 
@@ -200,27 +353,27 @@ def get_stock_history(
 ) -> StockHistoryResponse:
     """
     获取股票历史行情
-    
+
     获取指定股票的历史 K 线数据
-    
+
     Args:
         stock_code: 股票代码
         period: K 线周期 (daily/weekly/monthly)
         days: 获取天数
-        
+
     Returns:
         StockHistoryResponse: 历史行情数据
     """
     try:
         service = StockService()
-        
+
         # 使用 def 而非 async def，FastAPI 自动在线程池中执行
         result = service.get_history_data(
             stock_code=stock_code,
             period=period,
             days=days
         )
-        
+
         # 转换为响应模型
         data = [
             KLineData(
@@ -235,14 +388,14 @@ def get_stock_history(
             )
             for item in result.get("data", [])
         ]
-        
+
         return StockHistoryResponse(
             stock_code=stock_code,
             stock_name=result.get("stock_name"),
             period=period,
             data=data
         )
-    
+
     except ValueError as e:
         # period 参数不支持的错误（如 weekly/monthly）
         raise HTTPException(
@@ -338,5 +491,61 @@ def get_stock_intraday(
             detail={
                 "error": "internal_error",
                 "message": f"获取分钟行情失败: {str(e)}",
+            },
+        )
+
+
+@router.get(
+    "/{stock_code}/fund-flow",
+    response_model=StockFundFlowResponse,
+    responses={
+        200: {"description": "个股资金流向数据"},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="获取个股资金流向",
+    description="获取指定股票最近若干交易日的主力资金流向明细",
+)
+def get_stock_fund_flow(
+    stock_code: str,
+    limit: int = Query(10, ge=3, le=30, description="最近返回条数"),
+) -> StockFundFlowResponse:
+    """Get stock fund flow details."""
+    try:
+        service = StockService()
+        result = service.get_fund_flow_data(stock_code=stock_code, limit=limit)
+
+        data = [
+            FundFlowData(
+                date=item.get("date"),
+                close=item.get("close"),
+                change_percent=item.get("change_percent"),
+                main_net_inflow=item.get("main_net_inflow"),
+                main_net_inflow_ratio=item.get("main_net_inflow_ratio"),
+                super_large_net_inflow=item.get("super_large_net_inflow"),
+                super_large_net_inflow_ratio=item.get("super_large_net_inflow_ratio"),
+                large_net_inflow=item.get("large_net_inflow"),
+                large_net_inflow_ratio=item.get("large_net_inflow_ratio"),
+                medium_net_inflow=item.get("medium_net_inflow"),
+                medium_net_inflow_ratio=item.get("medium_net_inflow_ratio"),
+                small_net_inflow=item.get("small_net_inflow"),
+                small_net_inflow_ratio=item.get("small_net_inflow_ratio"),
+            )
+            for item in result.get("data", [])
+        ]
+
+        return StockFundFlowResponse(
+            stock_code=stock_code,
+            stock_name=result.get("stock_name"),
+            source=result.get("source"),
+            updated_at=result.get("updated_at"),
+            data=data,
+        )
+    except Exception as e:
+        logger.error(f"获取资金流向失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"获取资金流向失败: {str(e)}",
             },
         )

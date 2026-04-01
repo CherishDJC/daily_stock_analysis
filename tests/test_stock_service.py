@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from datetime import date, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -83,6 +84,50 @@ class StockServiceHistoryCacheTestCase(unittest.TestCase):
             [
                 {"timestamp": "09:31:12", "price": 38.98, "volume": 20, "side": "买盘"},
                 {"timestamp": "09:31:20", "price": 38.97, "volume": 12, "side": "卖盘"},
+            ]
+        )
+
+    def _make_fund_flow_df(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "日期": "2026-03-17",
+                    "收盘价": 38.12,
+                    "涨跌幅": -0.52,
+                    "主力净流入-净额": -12345678,
+                    "主力净流入-净占比": -4.31,
+                    "超大单净流入-净额": -5234567,
+                    "超大单净流入-净占比": -1.92,
+                    "大单净流入-净额": -7111111,
+                    "大单净流入-净占比": -2.39,
+                    "中单净流入-净额": 3456789,
+                    "中单净流入-净占比": 1.43,
+                    "小单净流入-净额": 8888889,
+                    "小单净流入-净占比": 2.88,
+                },
+                {
+                    "日期": "2026-03-18",
+                    "收盘价": 39.01,
+                    "涨跌幅": 2.34,
+                    "主力净流入-净额": 23456789,
+                    "主力净流入-净占比": 6.78,
+                    "超大单净流入-净额": 13456789,
+                    "超大单净流入-净占比": 3.82,
+                    "大单净流入-净额": 10000000,
+                    "大单净流入-净占比": 2.96,
+                    "中单净流入-净额": -7654321,
+                    "中单净流入-净占比": -2.21,
+                    "小单净流入-净额": -15802468,
+                    "小单净流入-净占比": -4.57,
+                },
+            ]
+        )
+
+    def _make_board_df(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {"板块名称": "机器人概念", "板块代码": "BK001"},
+                {"板块名称": "人工智能", "板块代码": "BK002"},
             ]
         )
 
@@ -218,6 +263,63 @@ class StockServiceHistoryCacheTestCase(unittest.TestCase):
         self.assertEqual(result["interval"], "5")
         self.assertEqual(len(result["bars"]), 2)
         self.assertEqual(result["trades"], [])
+
+    def test_fund_flow_returns_recent_rows(self) -> None:
+        manager = MagicMock()
+        manager.get_stock_name.return_value = "世纪恒通"
+
+        service = StockService(
+            repo=self.repo,
+            manager_factory=lambda: manager,
+            today_provider=lambda: self.today,
+        )
+
+        fake_akshare = MagicMock()
+        fake_akshare.stock_individual_fund_flow.return_value = self._make_fund_flow_df()
+
+        with patch.dict(sys.modules, {"akshare": fake_akshare}):
+            result = service.get_fund_flow_data("301428", limit=1)
+
+        fake_akshare.stock_individual_fund_flow.assert_called_once_with(stock="301428", market="sz")
+        self.assertEqual(result["stock_name"], "世纪恒通")
+        self.assertEqual(len(result["data"]), 1)
+        self.assertEqual(result["data"][0]["date"], "2026-03-18")
+        self.assertEqual(result["data"][0]["main_net_inflow"], 23456789.0)
+
+    def test_stock_meta_returns_basic_info_and_boards(self) -> None:
+        manager = MagicMock()
+        manager.get_stock_name.return_value = "机器人"
+        manager.get_base_info.return_value = {
+            "source": "tushare",
+            "industry": "专用设备",
+            "market": "创业板",
+            "area": "辽宁",
+            "list_date": "20091030",
+            "fullname": "沈阳新松机器人自动化股份有限公司",
+            "website": "https://example.com",
+            "main_business": "机器人与自动化装备",
+            "employees": "1234",
+            "pe_ratio": "88.12",
+            "pb_ratio": "4.56",
+            "total_mv": "12300000000",
+            "circ_mv": "9800000000",
+        }
+        manager.get_belong_board.return_value = self._make_board_df()
+
+        service = StockService(
+            repo=self.repo,
+            manager_factory=lambda: manager,
+            today_provider=lambda: self.today,
+        )
+
+        result = service.get_stock_meta_data("300024")
+
+        self.assertEqual(result["stock_name"], "机器人")
+        self.assertEqual(result["industry"], "专用设备")
+        self.assertEqual(result["list_date"], "2009-10-30")
+        self.assertEqual(result["employees"], 1234)
+        self.assertEqual(result["pe_ratio"], 88.12)
+        self.assertEqual(result["belong_boards"], ["机器人概念", "人工智能"])
 
 
 if __name__ == "__main__":
