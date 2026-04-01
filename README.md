@@ -278,7 +278,22 @@ python main.py
 
 > 说明：该缓存只用于低频变化的元数据，不替代实时行情、市场宽度或板块冷热等盘中快照。
 
-**可选密码保护**：在 `.env` 中设置 `ADMIN_AUTH_ENABLED=true` 可启用 Web 登录，首次访问在网页设置初始密码，保护 Settings 中的 API 密钥等敏感配置。详见 [完整指南](docs/full-guide.md)。
+**可选登录保护**：在 `.env` 中设置 `ADMIN_AUTH_ENABLED=true` 可启用整个 Web/API 的登录保护。未登录时页面会跳转 `/login`，`/api/v1/*` 也会返回 `401`。推荐在 `.env` 中显式配置管理员账号密码，并可选接入 Cloudflare Turnstile 真人验证：
+
+- `ADMIN_AUTH_USERNAME=admin`
+- `ADMIN_AUTH_PASSWORD=...`
+
+更安全的做法是使用哈希密码而不是明文：
+
+- `python -m src.auth print_password_hash`
+- `ADMIN_AUTH_PASSWORD_HASH=<salt_b64>:<hash_b64>`
+
+- `HUMAN_VERIFY_ENABLED=true`
+- `HUMAN_VERIFY_PROVIDER=turnstile`
+- `TURNSTILE_SITE_KEY=...`
+- `TURNSTILE_SECRET_KEY=...`
+
+> 说明：登录态基于 HttpOnly Session Cookie；`/api/health` 保持公开，`/docs` 也会要求先登录。第二阶段已增加登录审计日志、持久化失败限流和跨站 `Origin` 校验。
 
 ### 从图片添加股票
 

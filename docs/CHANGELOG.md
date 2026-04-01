@@ -23,6 +23,17 @@
   - `.github/workflows/daily_analysis.yml` 默认 `OPENAI_BASE_URL` 改为 `https://ark.cn-beijing.volces.com/api/coding/v3`
   - 定时分析默认模型改为 `ark-code-latest`，协议风格固定为 `chat_completions`
   - 为避免 Provider 优先级导致实际仍走 Gemini / Anthropic / AIHubMix，workflow 中显式禁用这些上层 Provider
+- 🔧 **Web 登录保护升级为固定账号密码 + 可选真人验证**
+  - `ADMIN_AUTH_ENABLED=true` 时，未登录访问页面将直接跳转 `/login`，`/api/v1/*` 保持 `401` 拦截
+  - Web 登录改为固定管理员账号密码模式，后端不再依赖首次设置密码流程；固定凭证常量位于 `src/auth.py`
+  - 新增可选 Cloudflare Turnstile 真人验证，支持 `HUMAN_VERIFY_ENABLED`、`HUMAN_VERIFY_PROVIDER`、`TURNSTILE_SITE_KEY`、`TURNSTILE_SECRET_KEY`
+  - `/docs`、`/redoc`、`/openapi.json` 也纳入登录保护范围
+- 🔧 **Web 认证第二阶段增强**
+  - 管理员凭证支持从 `.env` 读取 `ADMIN_AUTH_USERNAME`、`ADMIN_AUTH_PASSWORD` 或 `ADMIN_AUTH_PASSWORD_HASH`
+  - 新增 `python -m src.auth print_password_hash`，可直接生成环境变量可用的 PBKDF2 哈希
+  - 登录失败限流改为持久化状态，服务重启后仍然生效
+  - 新增认证审计日志表，记录登录成功、失败、未授权访问和来源校验拒绝
+  - 对带 Cookie 的写操作增加跨站 `Origin` 校验，降低 CSRF 风险
 
 ### 文档（#skip）
 - 📝 **新增 `start.md` 启动文档**
