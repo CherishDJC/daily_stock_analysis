@@ -47,17 +47,17 @@ async def app_lifespan(app: FastAPI):
 def create_app(static_dir: Optional[Path] = None) -> FastAPI:
     """
     创建并配置 FastAPI 应用实例
-    
+
     Args:
         static_dir: 静态文件目录路径（可选，默认为项目根目录下的 static）
-        
+
     Returns:
         配置完成的 FastAPI 应用实例
     """
     # 默认静态文件目录
     if static_dir is None:
         static_dir = Path(__file__).parent.parent / "static"
-    
+
     # 创建 FastAPI 实例
     app = FastAPI(
         title="Daily Stock Analysis API",
@@ -73,27 +73,27 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
         version="1.0.0",
         lifespan=app_lifespan,
     )
-    
+
     # ============================================================
     # CORS 配置
     # ============================================================
-    
+
     allowed_origins = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
-    
+
     # 从环境变量添加额外的允许来源
     extra_origins = os.environ.get("CORS_ORIGINS", "")
     if extra_origins:
         allowed_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
-    
+
     # 允许所有来源（开发/演示用）
     if os.environ.get("CORS_ALLOW_ALL", "").lower() == "true":
         allowed_origins = ["*"]
-    
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
@@ -103,20 +103,20 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
     )
 
     add_auth_middleware(app)
-    
+
     # ============================================================
     # 注册路由
     # ============================================================
-    
+
     app.include_router(api_v1_router)
     add_error_handlers(app)
-    
+
     # ============================================================
     # 根路由和健康检查
     # ============================================================
-    
+
     has_frontend = static_dir.exists() and (static_dir / "index.html").exists()
-    
+
     if has_frontend:
         @app.get("/", include_in_schema=False)
         async def root():
@@ -154,7 +154,12 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
         async def root():
             """根路由 - 前端未构建时返回引导页面"""
             return HTMLResponse(content=_FRONTEND_NOT_BUILT_HTML)
-    
+
+        @app.get("/login", include_in_schema=False)
+        async def login_placeholder():
+            """登录页占位 - 前端未构建时返回引导页面"""
+            return HTMLResponse(content=_FRONTEND_NOT_BUILT_HTML)
+
     @app.get(
         "/api/health",
         response_model=HealthResponse,
@@ -168,30 +173,30 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
             status="ok",
             timestamp=datetime.now().isoformat()
         )
-    
+
     # ============================================================
     # 静态文件托管（前端 SPA）
     # ============================================================
-    
+
     if has_frontend:
         # 挂载静态资源目录
         assets_dir = static_dir / "assets"
         if assets_dir.exists():
             app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
-        
+
         # SPA 路由回退
         @app.get("/{full_path:path}", include_in_schema=False)
         async def serve_spa(request: Request, full_path: str):
             """SPA 路由回退 - 非 API 路由返回 index.html"""
             if full_path.startswith("api/"):
                 return None
-            
+
             file_path = static_dir / full_path
             if file_path.exists() and file_path.is_file():
                 return FileResponse(file_path)
-            
+
             return FileResponse(static_dir / "index.html")
-    
+
     return app
 
 

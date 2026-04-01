@@ -17,6 +17,7 @@ import os
 import secrets
 import sys
 import time
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -30,6 +31,8 @@ RATE_LIMIT_WINDOW_SEC = 300
 RATE_LIMIT_MAX_FAILURES = 5
 SESSION_MAX_AGE_HOURS_DEFAULT = 24
 MIN_PASSWORD_LEN = 6
+FIXED_ADMIN_USERNAME = "admin"
+FIXED_ADMIN_PASSWORD = "Admin123456"
 
 # Lazy-loaded state
 _auth_enabled: Optional[bool] = None
@@ -55,6 +58,13 @@ def _ensure_env_loaded() -> None:
     setup_env()
 
 
+def _get_db_manager():
+    """Lazy import DB manager to avoid circular imports at module load time."""
+    from src.storage import get_db
+
+    return get_db()
+
+
 def _get_data_dir() -> Path:
     """Return DATA_DIR as parent of DATABASE_PATH."""
     db_path = os.getenv("DATABASE_PATH", "./data/stock_analysis.db")
@@ -64,6 +74,26 @@ def _get_data_dir() -> Path:
 def _get_credential_path() -> Path:
     """Path to stored password hash file."""
     return _get_data_dir() / ".admin_password_hash"
+
+
+def _get_admin_username() -> str:
+    """Return the configured admin username."""
+    _ensure_env_loaded()
+    return (os.getenv("ADMIN_AUTH_USERNAME") or FIXED_ADMIN_USERNAME).strip() or FIXED_ADMIN_USERNAME
+
+
+def _get_admin_password_hash() -> Optional[str]:
+    """Return the configured admin password hash if present."""
+    _ensure_env_loaded()
+    value = (os.getenv("ADMIN_AUTH_PASSWORD_HASH") or "").strip()
+    return value or None
+
+
+def _get_admin_password_plain() -> Optional[str]:
+    """Return the configured admin password if present."""
+    _ensure_env_loaded()
+    value = (os.getenv("ADMIN_AUTH_PASSWORD") or "").strip()
+    return value or None
 
 
 def _is_auth_enabled_from_env() -> bool:
@@ -140,6 +170,20 @@ def _verify_password_hash(submitted: str, salt: bytes, stored_hash: bytes) -> bo
     return hmac.compare_digest(computed, stored_hash)
 
 
+def generate_password_hash(password: str) -> str:
+    """Generate a portable PBKDF2 password hash string."""
+    salt = secrets.token_bytes(32)
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt=salt,
+        iterations=PBKDF2_ITERATIONS,
+    )
+    salt_b64 = base64.standard_b64encode(salt).decode("ascii")
+    hash_b64 = base64.standard_b64encode(derived).decode("ascii")
+    return f"{salt_b64}:{hash_b64}"
+
+
 def _load_credential_from_file() -> bool:
     """Load credential from file into module globals. Returns True if loaded."""
     global _password_hash_salt, _password_hash_stored
@@ -183,6 +227,64 @@ def is_password_set() -> bool:
 def is_password_changeable() -> bool:
     """Return whether password can be changed via web/CLI (always True when auth enabled)."""
     return is_auth_enabled()
+
+
+def get_fixed_admin_username() -> str:
+    """Return the fixed admin username for the web login."""
+    return _get_admin_username()
+
+
+def uses_fixed_credentials() -> bool:
+    """Return whether the current web auth flow uses fixed credentials."""
+    return True
+
+
+def verify_login_credentials(username: str, password: str) -> bool:
+    """Verify submitted login credentials against fixed admin credentials."""
+    if not is_auth_enabled():
+        return True
+    submitted_username = username or ""
+    submitted_password = password or ""
+    username_ok = hmac.compare_digest(submitted_username, _get_admin_username())
+
+    password_hash = _get_admin_password_hash()
+    if password_hash:
+        parsed = _parse_password_hash(password_hash)
+        if parsed is None:
+            logger.error("Invalid ADMIN_AUTH_PASSWORD_HASH format")
+            return False
+        salt, stored_hash = parsed
+        password_ok = _verify_password_hash(submitted_password, salt, stored_hash)
+    else:
+        configured_password = _get_admin_password_plain() or FIXED_ADMIN_PASSWORD
+        password_ok = hmac.compare_digest(submitted_password, configured_password)
+    return username_ok and password_ok
+
+
+def log_auth_event(
+    event_type: str,
+    ip: str,
+    username: Optional[str] = None,
+    path: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    success: Optional[bool] = None,
+    detail: Optional[str] = None,
+) -> None:
+    """Persist an auth audit log entry when auth is enabled."""
+    if not is_auth_enabled():
+        return
+    try:
+        _get_db_manager().save_auth_audit_log(
+            event_type=event_type,
+            ip=ip,
+            username=username,
+            path=path,
+            user_agent=user_agent,
+            success=success,
+            detail=detail,
+        )
+    except Exception as exc:
+        logger.warning("Failed to save auth audit log: %s", exc)
 
 
 def _get_session_secret() -> Optional[bytes]:
@@ -339,6 +441,16 @@ def get_client_ip(request) -> str:
 
 def check_rate_limit(ip: str) -> bool:
     """Return True if under limit, False if rate limited."""
+    if is_auth_enabled():
+        try:
+            return not _get_db_manager().is_auth_rate_limited(
+                ip=ip,
+                window_sec=RATE_LIMIT_WINDOW_SEC,
+                max_failures=RATE_LIMIT_MAX_FAILURES,
+            )
+        except Exception as exc:
+            logger.warning("Persistent rate limit lookup failed, falling back to memory: %s", exc)
+
     lock = _get_lock()
     now = time.time()
     with lock:
@@ -354,6 +466,13 @@ def check_rate_limit(ip: str) -> bool:
 
 def record_login_failure(ip: str) -> None:
     """Record a failed login attempt for rate limiting."""
+    if is_auth_enabled():
+        try:
+            _get_db_manager().record_auth_failure(ip=ip, window_sec=RATE_LIMIT_WINDOW_SEC)
+            return
+        except Exception as exc:
+            logger.warning("Persistent rate limit update failed, falling back to memory: %s", exc)
+
     lock = _get_lock()
     now = time.time()
     with lock:
@@ -369,9 +488,60 @@ def record_login_failure(ip: str) -> None:
 
 def clear_rate_limit(ip: str) -> None:
     """Clear rate limit for IP after successful login."""
+    if is_auth_enabled():
+        try:
+            _get_db_manager().clear_auth_failures(ip=ip)
+            return
+        except Exception as exc:
+            logger.warning("Persistent rate limit clear failed, falling back to memory: %s", exc)
+
     lock = _get_lock()
     with lock:
         _rate_limit.pop(ip, None)
+
+
+def _normalize_origin(value: str) -> Optional[str]:
+    """Normalize origin value into scheme://netloc."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def _get_request_origin(request) -> str:
+    """Return the canonical origin for the current request."""
+    if os.getenv("TRUST_X_FORWARDED_FOR", "false").lower() == "true":
+        host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.url.netloc
+        proto = request.headers.get("X-Forwarded-Proto") or request.url.scheme
+    else:
+        host = request.headers.get("Host") or request.url.netloc
+        proto = request.url.scheme
+    return f"{proto.lower()}://{host.lower()}"
+
+
+def validate_request_origin(request) -> Tuple[bool, Optional[str]]:
+    """Validate the Origin header for unsafe cookie-authenticated requests."""
+    if request.method.upper() in {"GET", "HEAD", "OPTIONS", "TRACE"}:
+        return True, None
+
+    origin = _normalize_origin(request.headers.get("Origin", ""))
+    if origin is None:
+        return True, None
+
+    allowed = {_get_request_origin(request)}
+    extra_origins = os.getenv("CORS_ORIGINS", "")
+    if extra_origins:
+        for item in extra_origins.split(","):
+            normalized = _normalize_origin(item)
+            if normalized:
+                allowed.add(normalized)
+
+    if origin in allowed:
+        return True, None
+    return False, "请求来源不被允许"
 
 
 def overwrite_password(new_password: str) -> Optional[str]:
@@ -441,11 +611,32 @@ def reset_password_cli() -> int:
     return 0
 
 
+def print_password_hash_cli() -> int:
+    """Interactive CLI to print an env-ready password hash."""
+    print("Enter password to hash (will not echo):", end=" ")
+    pwd = getpass.getpass("")
+    err = _validate_password(pwd)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
+
+    print("Confirm password:", end=" ")
+    pwd2 = getpass.getpass("")
+    if pwd != pwd2:
+        print("Error: Passwords do not match", file=sys.stderr)
+        return 1
+
+    print(generate_password_hash(pwd))
+    return 0
+
+
 def _main() -> int:
     """CLI entry: reset_password subcommand."""
     if len(sys.argv) > 1 and sys.argv[1] == "reset_password":
         return reset_password_cli()
-    print("Usage: python -m src.auth reset_password", file=sys.stderr)
+    if len(sys.argv) > 1 and sys.argv[1] == "print_password_hash":
+        return print_password_hash_cli()
+    print("Usage: python -m src.auth reset_password|print_password_hash", file=sys.stderr)
     return 1
 
 

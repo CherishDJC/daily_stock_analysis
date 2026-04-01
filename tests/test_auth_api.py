@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Integration tests for auth API endpoints (login, logout, change-password, API protection)."""
+"""Integration tests for auth API endpoints and route protection."""
 
 import os
 import tempfile
@@ -23,7 +23,7 @@ def _reset_auth_globals() -> None:
 
 
 class AuthApiTestCase(unittest.TestCase):
-    """Integration tests for /api/v1/auth/* and API protection."""
+    """Integration tests for fixed-credential auth mode."""
 
     def setUp(self) -> None:
         _reset_auth_globals()
@@ -54,113 +54,143 @@ class AuthApiTestCase(unittest.TestCase):
         os.environ.pop("DATABASE_PATH", None)
         self.temp_dir.cleanup()
 
-    def test_auth_status_when_password_not_set(self) -> None:
+    def _login_payload(self, **overrides):
+        payload = {
+            "username": auth.FIXED_ADMIN_USERNAME,
+            "password": auth.FIXED_ADMIN_PASSWORD,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_auth_status_exposes_fixed_credential_mode(self) -> None:
         response = self.client.get("/api/v1/auth/status")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["authEnabled"])
-        self.assertFalse(data["passwordSet"])
         self.assertFalse(data["loggedIn"])
+        self.assertTrue(data["passwordSet"])
+        self.assertFalse(data["passwordChangeable"])
+        self.assertTrue(data["usernameRequired"])
+        self.assertEqual(data["fixedUsername"], auth.FIXED_ADMIN_USERNAME)
+        self.assertFalse(data["humanVerificationEnabled"])
 
-    def test_login_first_time_set_initial_password(self) -> None:
+    def test_login_requires_username(self) -> None:
         response = self.client.post(
             "/api/v1/auth/login",
-            json={"password": "newpass123", "passwordConfirm": "newpass123"},
+            json={"username": "", "password": auth.FIXED_ADMIN_PASSWORD},
         )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "username_required")
+
+    def test_login_with_fixed_credentials_succeeds(self) -> None:
+        response = self.client.post("/api/v1/auth/login", json=self._login_payload())
         self.assertEqual(response.status_code, 200)
         self.assertIn("dsa_session", response.cookies)
         self.assertTrue(response.json().get("ok"))
 
-    def test_login_first_time_mismatch_rejected(self) -> None:
+    def test_login_wrong_username_returns_401(self) -> None:
         response = self.client.post(
             "/api/v1/auth/login",
-            json={"password": "pass1", "passwordConfirm": "pass2"},
-        )
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("password_mismatch", response.json().get("error", ""))
-
-    def test_login_after_set_normal_login(self) -> None:
-        self.client.post(
-            "/api/v1/auth/login",
-            json={"password": "mypass456", "passwordConfirm": "mypass456"},
-        )
-        response = self.client.post(
-            "/api/v1/auth/login",
-            json={"password": "mypass456"},
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json().get("ok"))
-
-    def test_login_wrong_password_returns_401(self) -> None:
-        self.client.post(
-            "/api/v1/auth/login",
-            json={"password": "correct", "passwordConfirm": "correct"},
-        )
-        response = self.client.post(
-            "/api/v1/auth/login",
-            json={"password": "wrong"},
+            json=self._login_payload(username="wrong"),
         )
         self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"], "invalid_credentials")
+
+    def test_login_wrong_password_returns_401(self) -> None:
+        response = self.client.post(
+            "/api/v1/auth/login",
+            json=self._login_payload(password="wrong"),
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"], "invalid_credentials")
+
+    @patch("api.v1.endpoints.auth.verify_human_token")
+    @patch("api.v1.endpoints.auth.get_human_verification_status")
+    def test_login_requires_human_token_when_enabled(self, mock_status, mock_verify) -> None:
+        mock_status.return_value = {
+            "enabled": True,
+            "provider": "turnstile",
+            "site_key": "site-key",
+        }
+        mock_verify.return_value = (False, "请先完成人机验证")
+        response = self.client.post("/api/v1/auth/login", json=self._login_payload())
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "human_verification_failed")
+
+    @patch("api.v1.endpoints.auth.verify_human_token")
+    @patch("api.v1.endpoints.auth.get_human_verification_status")
+    def test_login_accepts_valid_human_token(self, mock_status, mock_verify) -> None:
+        mock_status.return_value = {
+            "enabled": True,
+            "provider": "turnstile",
+            "site_key": "site-key",
+        }
+        mock_verify.return_value = (True, None)
+
+        response = self.client.post(
+            "/api/v1/auth/login",
+            json=self._login_payload(humanToken="turnstile-token"),
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_verify.assert_called_once()
 
     def test_logout_clears_cookie(self) -> None:
-        self.client.post(
-            "/api/v1/auth/login",
-            json={"password": "passwd6", "passwordConfirm": "passwd6"},
-        )
+        self.client.post("/api/v1/auth/login", json=self._login_payload())
         self.assertIn("dsa_session", self.client.cookies)
         self.client.post("/api/v1/auth/logout")
         response = self.client.get("/api/v1/system/config")
-        self.assertEqual(response.status_code, 401, "After logout, protected API should return 401")
+        self.assertEqual(response.status_code, 401)
 
-    def test_change_password_requires_session(self) -> None:
-        self.client.post(
-            "/api/v1/auth/login",
-            json={"password": "oldpass6", "passwordConfirm": "oldpass6"},
+    def test_logout_rejects_cross_site_origin(self) -> None:
+        self.client.post("/api/v1/auth/login", json=self._login_payload())
+        response = self.client.post(
+            "/api/v1/auth/logout",
+            headers={"Origin": "https://evil.example.com"},
         )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "origin_not_allowed")
+
+    def test_change_password_disabled_in_fixed_mode(self) -> None:
+        self.client.post("/api/v1/auth/login", json=self._login_payload())
         response = self.client.post(
             "/api/v1/auth/change-password",
             json={
-                "currentPassword": "oldpass6",
+                "currentPassword": auth.FIXED_ADMIN_PASSWORD,
                 "newPassword": "newpass6",
                 "newPasswordConfirm": "newpass6",
             },
         )
-        self.assertIn(response.status_code, (200, 204))
-
-    def test_change_password_wrong_current_rejected(self) -> None:
-        self.client.post(
-            "/api/v1/auth/login",
-            json={"password": "actual6", "passwordConfirm": "actual6"},
-        )
-        response = self.client.post(
-            "/api/v1/auth/change-password",
-            json={
-                "currentPassword": "wrong",
-                "newPassword": "new123",
-                "newPasswordConfirm": "new123",
-            },
-        )
         self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "not_changeable")
 
     def test_protected_api_returns_401_without_session(self) -> None:
-        self.client.post(
-            "/api/v1/auth/login",
-            json={"password": "passwd6", "passwordConfirm": "passwd6"},
-        )
-        client_no_cookie = TestClient(
-            create_app(static_dir=self.data_dir / "empty-static"),
-            raise_server_exceptions=False,
-        )
-        response = client_no_cookie.get("/api/v1/system/config")
+        response = self.client.get("/api/v1/system/config")
         self.assertEqual(response.status_code, 401)
 
+    def test_root_redirects_to_login_without_session(self) -> None:
+        response = self.client.get("/", follow_redirects=False)
+        self.assertEqual(response.status_code, 307)
+        self.assertIn("/login?redirect=%2F", response.headers["location"])
+
+    def test_docs_redirect_to_login_without_session(self) -> None:
+        response = self.client.get("/docs", follow_redirects=False)
+        self.assertEqual(response.status_code, 307)
+        self.assertIn("/login?redirect=%2Fdocs", response.headers["location"])
+
     def test_protected_api_accessible_with_session(self) -> None:
-        self.client.post(
-            "/api/v1/auth/login",
-            json={"password": "passwd6", "passwordConfirm": "passwd6"},
-        )
+        self.client.post("/api/v1/auth/login", json=self._login_payload())
         response = self.client.get("/api/v1/system/config")
         self.assertEqual(response.status_code, 200)
+
+    def test_mutating_api_rejects_cross_site_origin(self) -> None:
+        self.client.post("/api/v1/auth/login", json=self._login_payload())
+        response = self.client.put(
+            "/api/v1/system/config",
+            json={"config_version": "v1", "items": [], "reload_now": False},
+            headers={"Origin": "https://evil.example.com"},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "origin_not_allowed")
 
 
 if __name__ == "__main__":

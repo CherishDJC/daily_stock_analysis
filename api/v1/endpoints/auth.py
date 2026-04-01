@@ -17,14 +17,23 @@ from src.auth import (
     check_rate_limit,
     clear_rate_limit,
     create_session,
+    get_fixed_admin_username,
     get_client_ip,
     is_auth_enabled,
     is_password_changeable,
     is_password_set,
+    log_auth_event,
     record_login_failure,
     set_initial_password,
+    uses_fixed_credentials,
+    validate_request_origin,
+    verify_login_credentials,
     verify_password,
     verify_session,
+)
+from src.services.human_verification_service import (
+    get_human_verification_status,
+    verify_human_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,12 +42,13 @@ router = APIRouter()
 
 
 class LoginRequest(BaseModel):
-    """Login request body. For first-time setup use password + password_confirm."""
+    """Login request body."""
 
     model_config = {"populate_by_name": True}
 
+    username: str = Field(default="", description="Admin username")
     password: str = Field(default="", description="Admin password")
-    password_confirm: str | None = Field(default=None, alias="passwordConfirm", description="Confirm (first-time)")
+    human_token: str | None = Field(default=None, alias="humanToken", description="Human verification token")
 
 
 class ChangePasswordRequest(BaseModel):
@@ -85,14 +95,20 @@ async def auth_status(request: Request):
     """Return authEnabled, loggedIn, passwordSet, passwordChangeable without requiring auth."""
     auth_enabled = is_auth_enabled()
     logged_in = False
+    human_status = get_human_verification_status()
     if auth_enabled:
         cookie_val = request.cookies.get(COOKIE_NAME)
         logged_in = verify_session(cookie_val) if cookie_val else False
     return {
         "authEnabled": auth_enabled,
         "loggedIn": logged_in,
-        "passwordSet": is_password_set() if auth_enabled else False,
-        "passwordChangeable": is_password_changeable() if auth_enabled else False,
+        "passwordSet": True if auth_enabled and uses_fixed_credentials() else (is_password_set() if auth_enabled else False),
+        "passwordChangeable": False if auth_enabled and uses_fixed_credentials() else (is_password_changeable() if auth_enabled else False),
+        "usernameRequired": auth_enabled,
+        "fixedUsername": get_fixed_admin_username() if auth_enabled and uses_fixed_credentials() else None,
+        "humanVerificationEnabled": human_status["enabled"],
+        "humanVerificationProvider": human_status["provider"],
+        "turnstileSiteKey": human_status["site_key"],
     }
 
 
@@ -109,7 +125,30 @@ async def auth_login(request: Request, body: LoginRequest):
             content={"error": "auth_disabled", "message": "Authentication is not configured"},
         )
 
+    origin_ok, origin_error = validate_request_origin(request)
+    if not origin_ok:
+        ip = get_client_ip(request)
+        log_auth_event(
+            event_type="origin_rejected",
+            ip=ip,
+            username=(body.username or "").strip() or None,
+            path=str(request.url.path),
+            user_agent=request.headers.get("User-Agent"),
+            success=False,
+            detail=origin_error,
+        )
+        return JSONResponse(
+            status_code=403,
+            content={"error": "origin_not_allowed", "message": origin_error or "请求来源不被允许"},
+        )
+
+    username = (body.username or "").strip()
     password = (body.password or "").strip()
+    if not username:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "username_required", "message": "请输入用户名"},
+        )
     if not password:
         return JSONResponse(
             status_code=400,
@@ -118,6 +157,15 @@ async def auth_login(request: Request, body: LoginRequest):
 
     ip = get_client_ip(request)
     if not check_rate_limit(ip):
+        log_auth_event(
+            event_type="login_rate_limited",
+            ip=ip,
+            username=username or None,
+            path=str(request.url.path),
+            user_agent=request.headers.get("User-Agent"),
+            success=False,
+            detail="too_many_failures",
+        )
         return JSONResponse(
             status_code=429,
             content={
@@ -126,27 +174,60 @@ async def auth_login(request: Request, body: LoginRequest):
             },
         )
 
-    password_set = is_password_set()
+    human_ok, human_error = verify_human_token(body.human_token or "", remote_ip=ip)
+    if not human_ok:
+        record_login_failure(ip)
+        log_auth_event(
+            event_type="login_failed",
+            ip=ip,
+            username=username or None,
+            path=str(request.url.path),
+            user_agent=request.headers.get("User-Agent"),
+            success=False,
+            detail=human_error,
+        )
+        return JSONResponse(
+            status_code=400,
+            content={"error": "human_verification_failed", "message": human_error or "人机验证失败"},
+        )
 
-    if not password_set:
-        # First-time setup: require passwordConfirm
-        confirm = (body.password_confirm or "").strip()
-        if password != confirm:
+    if uses_fixed_credentials():
+        if not verify_login_credentials(username=username, password=password):
             record_login_failure(ip)
-            return JSONResponse(
-                status_code=400,
-                content={"error": "password_mismatch", "message": "Passwords do not match"},
+            log_auth_event(
+                event_type="login_failed",
+                ip=ip,
+                username=username or None,
+                path=str(request.url.path),
+                user_agent=request.headers.get("User-Agent"),
+                success=False,
+                detail="invalid_credentials",
             )
-        err = set_initial_password(password)
-        if err:
-            record_login_failure(ip)
             return JSONResponse(
-                status_code=400,
-                content={"error": "invalid_password", "message": err},
+                status_code=401,
+                content={"error": "invalid_credentials", "message": "用户名或密码错误"},
             )
     else:
-        if not verify_password(password):
+        password_set = is_password_set()
+        if not password_set:
+            err = set_initial_password(password)
+            if err:
+                record_login_failure(ip)
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "invalid_password", "message": err},
+                )
+        elif not verify_password(password):
             record_login_failure(ip)
+            log_auth_event(
+                event_type="login_failed",
+                ip=ip,
+                username=username or None,
+                path=str(request.url.path),
+                user_agent=request.headers.get("User-Agent"),
+                success=False,
+                detail="invalid_password",
+            )
             return JSONResponse(
                 status_code=401,
                 content={"error": "invalid_password", "message": "密码错误"},
@@ -161,6 +242,15 @@ async def auth_login(request: Request, body: LoginRequest):
         )
 
     resp = JSONResponse(content={"ok": True})
+    log_auth_event(
+        event_type="login_success",
+        ip=ip,
+        username=username or None,
+        path=str(request.url.path),
+        user_agent=request.headers.get("User-Agent"),
+        success=True,
+        detail="login_ok",
+    )
     params = _cookie_params(request)
     resp.set_cookie(
         key=COOKIE_NAME,
@@ -179,8 +269,29 @@ async def auth_login(request: Request, body: LoginRequest):
     summary="Change password",
     description="Change password. Requires valid session.",
 )
-async def auth_change_password(body: ChangePasswordRequest):
+async def auth_change_password(request: Request, body: ChangePasswordRequest):
     """Change password. Requires login."""
+    origin_ok, origin_error = validate_request_origin(request)
+    if not origin_ok:
+        ip = get_client_ip(request)
+        log_auth_event(
+            event_type="origin_rejected",
+            ip=ip,
+            path=str(request.url.path),
+            user_agent=request.headers.get("User-Agent"),
+            success=False,
+            detail=origin_error,
+        )
+        return JSONResponse(
+            status_code=403,
+            content={"error": "origin_not_allowed", "message": origin_error or "请求来源不被允许"},
+        )
+
+    if uses_fixed_credentials():
+        return JSONResponse(
+            status_code=400,
+            content={"error": "not_changeable", "message": "固定账号模式不支持在线修改密码"},
+        )
     if not is_password_changeable():
         return JSONResponse(
             status_code=400,
@@ -218,6 +329,31 @@ async def auth_change_password(body: ChangePasswordRequest):
 )
 async def auth_logout(request: Request):
     """Clear session cookie."""
+    origin_ok, origin_error = validate_request_origin(request)
+    if not origin_ok:
+        ip = get_client_ip(request)
+        log_auth_event(
+            event_type="origin_rejected",
+            ip=ip,
+            path=str(request.url.path),
+            user_agent=request.headers.get("User-Agent"),
+            success=False,
+            detail=origin_error,
+        )
+        return JSONResponse(
+            status_code=403,
+            content={"error": "origin_not_allowed", "message": origin_error or "请求来源不被允许"},
+        )
+
+    ip = get_client_ip(request)
     resp = Response(status_code=204)
     resp.delete_cookie(key=COOKIE_NAME, path="/")
+    log_auth_event(
+        event_type="logout",
+        ip=ip,
+        path=str(request.url.path),
+        user_agent=request.headers.get("User-Agent"),
+        success=True,
+        detail="logout",
+    )
     return resp

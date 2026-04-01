@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import src.auth as auth
+from src.config import Config
+from src.storage import DatabaseManager
 
 
 def _reset_auth_globals() -> None:
@@ -38,6 +40,20 @@ class AuthValidationTestCase(unittest.TestCase):
     def test_validate_password_valid(self) -> None:
         self.assertIsNone(auth._validate_password("123456"))
         self.assertIsNone(auth._validate_password("password123"))
+
+    def test_verify_fixed_login_credentials(self) -> None:
+        auth._auth_enabled = True
+        self.assertTrue(auth.verify_login_credentials(auth.FIXED_ADMIN_USERNAME, auth.FIXED_ADMIN_PASSWORD))
+        self.assertFalse(auth.verify_login_credentials("wrong", auth.FIXED_ADMIN_PASSWORD))
+        self.assertFalse(auth.verify_login_credentials(auth.FIXED_ADMIN_USERNAME, "wrong"))
+
+    @patch.dict(os.environ, {"ADMIN_AUTH_USERNAME": "root"}, clear=False)
+    def test_verify_login_credentials_supports_env_password_hash(self) -> None:
+        hashed = auth.generate_password_hash("secret123")
+        with patch.dict(os.environ, {"ADMIN_AUTH_PASSWORD_HASH": hashed}, clear=False):
+            auth._auth_enabled = True
+            self.assertTrue(auth.verify_login_credentials("root", "secret123"))
+            self.assertFalse(auth.verify_login_credentials("root", "wrong"))
 
 
 class AuthPasswordHashTestCase(unittest.TestCase):
@@ -151,6 +167,59 @@ class AuthRateLimitTestCase(unittest.TestCase):
         self.assertFalse(auth.check_rate_limit(ip))
         auth.clear_rate_limit(ip)
         self.assertTrue(auth.check_rate_limit(ip))
+
+
+class AuthPersistenceTestCase(unittest.TestCase):
+    """Persistent auth state should survive process-level resets when auth is enabled."""
+
+    def setUp(self) -> None:
+        _reset_auth_globals()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.temp_dir.name)
+        self.addCleanup(self.temp_dir.cleanup)
+        os.environ["DATABASE_PATH"] = str(self.data_dir / "auth_test.db")
+        Config.reset_instance()
+        DatabaseManager.reset_instance()
+
+    def tearDown(self) -> None:
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        os.environ.pop("DATABASE_PATH", None)
+
+    def test_persistent_rate_limit_survives_reset(self) -> None:
+        with patch.object(auth, "_is_auth_enabled_from_env", return_value=True):
+            with patch.object(auth, "_get_data_dir", return_value=self.data_dir):
+                auth._auth_enabled = True
+                ip = "203.0.113.10"
+                for _ in range(auth.RATE_LIMIT_MAX_FAILURES):
+                    auth.record_login_failure(ip)
+                self.assertFalse(auth.check_rate_limit(ip))
+
+                _reset_auth_globals()
+                auth._auth_enabled = True
+                self.assertFalse(auth.check_rate_limit(ip))
+
+                auth.clear_rate_limit(ip)
+                self.assertTrue(auth.check_rate_limit(ip))
+
+    def test_auth_audit_log_is_persisted(self) -> None:
+        with patch.object(auth, "_is_auth_enabled_from_env", return_value=True):
+            with patch.object(auth, "_get_data_dir", return_value=self.data_dir):
+                auth._auth_enabled = True
+                auth.log_auth_event(
+                    event_type="login_success",
+                    ip="203.0.113.11",
+                    username="admin",
+                    path="/api/v1/auth/login",
+                    success=True,
+                    detail="ok",
+                )
+
+                rows = DatabaseManager.get_instance().get_auth_audit_logs(limit=10)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["event_type"], "login_success")
+                self.assertEqual(rows[0]["ip"], "203.0.113.11")
+                self.assertEqual(rows[0]["username"], "admin")
 
 
 class AuthSetPasswordTestCase(unittest.TestCase):
