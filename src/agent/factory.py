@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # Module-level caches
 # ---------------------------------------------------------------------------
 _TOOL_REGISTRY = None
+_SCREENER_TOOL_REGISTRY = None
 _SKILL_MANAGER_PROTOTYPE = None
 # Sentinel used as initial value so None (i.e. no custom dir) compares as "changed"
 # on the very first call, forcing a build rather than accidentally skipping it.
@@ -49,6 +50,35 @@ DEFAULT_AGENT_SKILLS = [
     "shrink_pullback",
 ]
 
+SCREENER_ALLOWED_TOOLS = {
+    "screen_stocks_full_scan",
+    "get_sector_top_stocks",
+    "get_market_indices",
+    "get_sector_rankings",
+    "search_stock_news",
+}
+
+
+def _load_all_tool_definitions():
+    """Load all registered tool definitions once for registry builders."""
+    from src.agent.tools.data_tools import ALL_DATA_TOOLS
+    from src.agent.tools.analysis_tools import ALL_ANALYSIS_TOOLS
+    from src.agent.tools.search_tools import ALL_SEARCH_TOOLS
+    from src.agent.tools.market_tools import ALL_MARKET_TOOLS
+    from src.agent.tools.screener_tools import ALL_SCREENER_TOOLS
+
+    return ALL_DATA_TOOLS + ALL_ANALYSIS_TOOLS + ALL_SEARCH_TOOLS + ALL_MARKET_TOOLS + ALL_SCREENER_TOOLS
+
+
+def _build_registry(tool_defs):
+    """Build a ToolRegistry from the provided tool definitions."""
+    from src.agent.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    for tool_def in tool_defs:
+        registry.register(tool_def)
+    return registry
+
 
 def get_tool_registry():
     """Return a cached ToolRegistry (built once, shared across requests)."""
@@ -56,19 +86,29 @@ def get_tool_registry():
     if _TOOL_REGISTRY is not None:
         return _TOOL_REGISTRY
 
-    from src.agent.tools.registry import ToolRegistry
-    from src.agent.tools.data_tools import ALL_DATA_TOOLS
-    from src.agent.tools.analysis_tools import ALL_ANALYSIS_TOOLS
-    from src.agent.tools.search_tools import ALL_SEARCH_TOOLS
-    from src.agent.tools.market_tools import ALL_MARKET_TOOLS
-
-    registry = ToolRegistry()
-    for tool_fn in ALL_DATA_TOOLS + ALL_ANALYSIS_TOOLS + ALL_SEARCH_TOOLS + ALL_MARKET_TOOLS:
-        registry.register(tool_fn)
+    registry = _build_registry(_load_all_tool_definitions())
 
     _TOOL_REGISTRY = registry
     logger.info("[AgentFactory] ToolRegistry cached (%d tools)", len(registry._tools) if hasattr(registry, "_tools") else -1)
     return _TOOL_REGISTRY
+
+
+def get_screener_tool_registry():
+    """Return a cached ToolRegistry restricted to screener-relevant tools."""
+    global _SCREENER_TOOL_REGISTRY
+    if _SCREENER_TOOL_REGISTRY is not None:
+        return _SCREENER_TOOL_REGISTRY
+
+    tool_defs = [tool_def for tool_def in _load_all_tool_definitions() if tool_def.name in SCREENER_ALLOWED_TOOLS]
+    registry = _build_registry(tool_defs)
+
+    _SCREENER_TOOL_REGISTRY = registry
+    logger.info(
+        "[AgentFactory] Screener ToolRegistry cached (%d tools): %s",
+        len(registry._tools) if hasattr(registry, "_tools") else -1,
+        sorted(registry.list_names()),
+    )
+    return _SCREENER_TOOL_REGISTRY
 
 
 def get_skill_manager(config=None):
@@ -151,3 +191,44 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
 
 # Keep legacy alias so any external callers using the old name still work.
 build_executor = build_agent_executor
+
+
+def build_screener_executor(config=None, skills: Optional[List[str]] = None):
+    """Build and return a configured AgentExecutor for stock screening.
+
+    Uses the same tool registry but with a screener-focused system prompt
+    handled internally by AgentExecutor.screener().
+
+    Args:
+        config: Application config object.  When *None*, ``get_config()`` is
+                called automatically.
+        skills: Strategy ids to activate.  When *None* falls back to
+                ``config.agent_skills``; if that is also empty falls back to
+                ``DEFAULT_AGENT_SKILLS``.
+
+    Returns:
+        A ready-to-call :class:`src.agent.executor.AgentExecutor` instance.
+    """
+    if config is None:
+        from src.config import get_config
+        config = get_config()
+
+    from src.agent.executor import AgentExecutor
+    from src.agent.llm_adapter import LLMToolAdapter
+
+    registry = get_screener_tool_registry()
+    skill_manager = get_skill_manager(config)
+
+    skills_to_activate = skills if skills is not None else []
+    skill_instructions = ""
+    if skills_to_activate:
+        skill_manager.activate(skills_to_activate)
+        skill_instructions = skill_manager.get_skill_instructions()
+
+    llm_adapter = LLMToolAdapter(config)
+    return AgentExecutor(
+        tool_registry=registry,
+        llm_adapter=llm_adapter,
+        skill_instructions=skill_instructions,
+        max_steps=min(getattr(config, "agent_max_steps", 10), 6),  # Screener follows a narrower workflow
+    )

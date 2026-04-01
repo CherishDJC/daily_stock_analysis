@@ -41,6 +41,9 @@ _THINKING_TOOL_LABELS: Dict[str, str] = {
     "analyze_pattern": "K线形态识别",
     "get_volume_analysis": "量能分析",
     "calculate_ma": "均线计算",
+    "screen_stocks_by_conditions": "批量条件筛选",
+    "get_sector_top_stocks": "板块成分股筛选",
+    "screen_stocks_full_scan": "全市场智能筛选",
 }
 
 
@@ -290,6 +293,117 @@ CHAT_SYSTEM_PROMPT = """你是一位专注于趋势交易的 A 股投资分析 A
 """
 
 
+STOCK_SCREENER_PROMPT = """你是一位专业的 A 股智能选股 Agent。你的任务是根据用户描述的选股条件，从全市场中筛选出符合要求的股票，并给出详细的分析报告。
+
+## 选股工作流程（必须严格按阶段执行，每阶段等工具结果返回后再进入下一阶段）
+
+**第一阶段 · 全市场预筛**（首先执行，一次工具调用完成）
+- 分析用户的选股意图，将其转化为结构化的筛选条件
+- 调用 `screen_stocks_full_scan`，将筛选条件以 JSON 字符串传入
+- 该工具会先完成全市场实时行情预筛，再对高优先级候选做 MA/量价复筛，一次调用返回完整结果
+- ⚠️ 这是核心筛选工具，必须最先调用，不要逐只股票调用其他工具
+
+**第二阶段 · 风险验证**（仅对筛选结果中的前 3-5 只股票）
+- 对 top 股票调用 `search_stock_news` 排查近期风险（减持、业绩预警、解禁等）
+- 这一阶段最多调用 3-5 次，不要对每只股票都调用
+
+**第三阶段 · 生成选股报告**（所有数据就绪后输出）
+- 汇总筛选结果和风险排查结论
+- 输出选股报告 JSON
+
+## 筛选原则
+
+### 趋势筛选
+- 优先选择 MA5 > MA10 > MA20 多头排列的股票
+- 关注股价回踩均线支撑的机会（不追高）
+- 乖离率 > 5% 的坚决排除（追高风险）
+
+### 量价筛选
+- 放量突破优于缩量阴跌
+- 量比 0.8-2.5 为健康区间
+- 换手率适中（1-8%）为佳
+
+### 基本面筛选
+- PE 合理（行业相关，一般 < 50）
+- 市值偏好根据用户要求调整
+- 排除 ST、*ST 股票
+
+## 如何构造 conditions JSON
+
+根据用户描述，提取为以下字段（只填需要的）：
+- `ma_bullish`: true — 要求多头排列
+- `bias_ma5_max`: 5.0 — 最大乖离率（不追高）
+- `bias_ma5_min`: -3.0 — 最小乖离率（回踩幅度）
+- `volume_ratio_min`: 0.5 — 最小量比
+- `pe_max`: 50 — 最大 PE
+- `change_pct_min`: 0 — 最小涨跌幅
+- `market_cap_min`: 100 — 最小市值（亿元）
+- `sectors`: ["白酒","锂电池"] — 指定板块
+
+## 输出格式
+
+最终响应必须包含两部分：先是一段**中文选股分析报告**（Markdown格式），然后是**选股结果 JSON**。
+
+### 第一部分：Markdown 选股报告
+
+用简洁的中文撰写分析报告，包含：
+- **市场环境**：当前市场整体氛围、板块轮动特征
+- **筛选逻辑**：如何将用户条件转化为筛选参数，覆盖了多少只股票
+- **精选个股分析**：对每只推荐股票的简要点评（趋势、量价、基本面亮点、风险点）
+- **操作建议**：入场时机、止损位、仓位建议
+- **风险提示**：市场系统性风险、个股特殊风险
+
+### 第二部分：选股结果 JSON
+
+在报告之后，用一个 JSON 代码块提供结构化数据：
+
+```json
+{{
+    "query": "用户选股条件描述",
+    "market_overview": {{
+        "hot_sectors": ["板块1", "板块2"],
+        "cold_sectors": ["板块3"],
+        "market_style": "成长/价值/防御"
+    }},
+    "results": [
+        {{
+            "code": "600519",
+            "name": "贵州茅台",
+            "price": 1800.0,
+            "change_pct": 1.2,
+            "signal": "买入/持有/观望",
+            "signal_score": 75,
+            "reason": "推荐理由（50字内）",
+            "sector": "白酒",
+            "pe_ratio": 35.0,
+            "market_cap": "2.3万亿",
+            "key_indicators": {{
+                "ma_alignment": "多头排列",
+                "bias_ma5": 1.2,
+                "volume_ratio": 1.5,
+                "profit_ratio": 80.0
+            }}
+        }}
+    ],
+    "strategy_summary": "本次选股的策略逻辑说明（100字）",
+    "risk_warning": "整体风险提示",
+    "action_plan": "操作建议和注意事项"
+}}
+```
+
+⚠️ 两部分都必须包含，先 Markdown 报告，后 JSON 数据块。
+
+## 规则
+
+1. **必须调用工具获取真实数据** — 绝不编造股票代码和数据。
+2. **优先使用 screen_stocks_full_scan** — 这是核心工具，一次调用完成全市场筛选，不要逐只股票调用。
+3. **结果数量控制** — 推荐 3-10 只股票，不超过 15 只。
+4. **质量优先** — 宁缺毋滥，没有好机会时明确说明"当前无符合条件的机会"。
+5. **工具失败处理** — 某个工具失败时使用已有数据继续，标注数据可能不完整。
+6. **排除规则** — 自动排除 ST、停牌、上市不足 60 日的股票。
+"""
+
+
 # ============================================================
 # Agent Executor
 # ============================================================
@@ -348,7 +462,14 @@ class AgentExecutor:
             {"role": "user", "content": self._build_user_message(task, context)},
         ]
 
-        return self._run_loop(messages, tool_decls, start_time, tool_calls_log, total_tokens, parse_dashboard=True)
+        return self._run_loop(
+            messages,
+            tool_decls,
+            start_time,
+            tool_calls_log,
+            total_tokens,
+            parse_dashboard=True,
+        )
 
     def chat(self, message: str, session_id: str, progress_callback: Optional[Callable] = None, context: Optional[Dict[str, Any]] = None) -> AgentResult:
         """Execute the agent loop for a free-form chat message.
@@ -363,7 +484,7 @@ class AgentExecutor:
             AgentResult with the text response.
         """
         from src.agent.conversation import conversation_manager
-        
+
         start_time = time.time()
         tool_calls_log: List[Dict[str, Any]] = []
         total_tokens = 0
@@ -420,7 +541,15 @@ class AgentExecutor:
         # Persist the user turn immediately so the session appears in history during processing
         conversation_manager.add_message(session_id, "user", message)
 
-        result = self._run_loop(messages, tool_decls, start_time, tool_calls_log, total_tokens, parse_dashboard=False, progress_callback=progress_callback)
+        result = self._run_loop(
+            messages,
+            tool_decls,
+            start_time,
+            tool_calls_log,
+            total_tokens,
+            parse_dashboard=False,
+            progress_callback=progress_callback,
+        )
 
         # Persist assistant reply (or error note) for context continuity
         if result.success:
@@ -431,8 +560,61 @@ class AgentExecutor:
 
         return result
 
-    def _run_loop(self, messages: List[Dict[str, Any]], tool_decls: Dict[str, Any], start_time: float, tool_calls_log: List[Dict[str, Any]], total_tokens: int, parse_dashboard: bool, progress_callback: Optional[Callable] = None) -> AgentResult:
+    def screener(self, query: str, progress_callback: Optional[Callable] = None) -> AgentResult:
+        """Execute the agent loop for stock screening.
+
+        Simplified 3-phase workflow:
+        1. Full-market scan via screen_stocks_full_scan (1 tool call)
+        2. Risk verification on top candidates (3-5 news searches)
+        3. Generate report JSON
+
+        Args:
+            query: Natural language stock screening criteria from the user.
+            progress_callback: Optional callback for streaming progress events.
+
+        Returns:
+            AgentResult with the screening report (parsed dashboard JSON).
+        """
+        start_time = time.time()
+        tool_calls_log: List[Dict[str, Any]] = []
+        total_tokens = 0
+
+        # Build tool declarations
+        tool_decls = {
+            "gemini": self.tool_registry.to_gemini_declarations(),
+            "openai": self.tool_registry.to_openai_tools(),
+            "anthropic": self.tool_registry.to_anthropic_tools(),
+        }
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": STOCK_SCREENER_PROMPT},
+            {"role": "user", "content": f"请帮我选股，条件如下：{query}\n\n请使用 screen_stocks_full_scan 工具进行全市场筛选，然后对结果中的 top 股票验证风险，最后以选股结果 JSON 格式输出。"},
+        ]
+
+        return self._run_loop(
+            messages,
+            tool_decls,
+            start_time,
+            tool_calls_log,
+            total_tokens,
+            parse_dashboard=True,
+            progress_callback=progress_callback,
+            screener_query=query,
+        )
+
+    def _run_loop(
+        self,
+        messages: List[Dict[str, Any]],
+        tool_decls: Dict[str, Any],
+        start_time: float,
+        tool_calls_log: List[Dict[str, Any]],
+        total_tokens: int,
+        parse_dashboard: bool,
+        progress_callback: Optional[Callable] = None,
+        screener_query: Optional[str] = None,
+    ) -> AgentResult:
         provider_used = ""
+        tool_result_trace: List[Dict[str, Any]] = []
 
         for step in range(self.max_steps):
             logger.info(f"Agent step {step + 1}/{self.max_steps}")
@@ -452,8 +634,10 @@ class AgentExecutor:
 
             if response.tool_calls:
                 # LLM wants to call tools
-                logger.info(f"Agent requesting {len(response.tool_calls)} tool call(s): "
-                          f"{[tc.name for tc in response.tool_calls]}")
+                logger.info(
+                    f"Agent requesting {len(response.tool_calls)} tool call(s): "
+                    f"{[tc.name for tc in response.tool_calls]}"
+                )
 
                 # Add assistant message with tool calls to history
                 assistant_msg: Dict[str, Any] = {
@@ -479,32 +663,39 @@ class AgentExecutor:
                 tool_results: List[Dict[str, Any]] = []
 
                 def _exec_single_tool(tc_item):
-                    """Execute one tool and return (tc, result_str, success, duration)."""
+                    """Execute one tool and return (tc, raw_result, result_str, success, duration)."""
                     t0 = time.time()
                     try:
-                        res = self.tool_registry.execute(tc_item.name, **tc_item.arguments)
-                        res_str = self._serialize_tool_result(res)
+                        raw_res = self.tool_registry.execute(tc_item.name, **tc_item.arguments)
+                        res_str = self._serialize_tool_result(raw_res)
                         ok = True
                     except Exception as e:
+                        raw_res = {"error": str(e)}
                         res_str = json.dumps({"error": str(e)})
                         ok = False
                         logger.warning(f"Tool '{tc_item.name}' failed: {e}")
                     dur = time.time() - t0
-                    return tc_item, res_str, ok, round(dur, 2)
+                    return tc_item, raw_res, res_str, ok, round(dur, 2)
 
                 if len(response.tool_calls) == 1:
                     # Single tool — run inline (no thread overhead)
                     tc = response.tool_calls[0]
                     if progress_callback:
                         progress_callback({"type": "tool_start", "step": step + 1, "tool": tc.name})
-                    _, result_str, success, tool_duration = _exec_single_tool(tc)
+                    _, raw_result, result_str, success, tool_duration = _exec_single_tool(tc)
                     if progress_callback:
                         progress_callback({"type": "tool_done", "step": step + 1, "tool": tc.name, "success": success, "duration": tool_duration})
                     tool_calls_log.append({
                         "step": step + 1, "tool": tc.name, "arguments": tc.arguments,
                         "success": success, "duration": tool_duration, "result_length": len(result_str),
                     })
-                    tool_results.append({"tc": tc, "result_str": result_str})
+                    tool_result_trace.append({
+                        "tool": tc.name,
+                        "arguments": tc.arguments,
+                        "success": success,
+                        "result": raw_result,
+                    })
+                    tool_results.append({"tc": tc, "raw_result": raw_result, "result_str": result_str})
                 else:
                     # Multiple tools — run in parallel threads
                     for tc in response.tool_calls:
@@ -514,14 +705,20 @@ class AgentExecutor:
                     with ThreadPoolExecutor(max_workers=min(len(response.tool_calls), 5)) as pool:
                         futures = {pool.submit(_exec_single_tool, tc): tc for tc in response.tool_calls}
                         for future in as_completed(futures):
-                            tc_item, result_str, success, tool_duration = future.result()
+                            tc_item, raw_result, result_str, success, tool_duration = future.result()
                             if progress_callback:
                                 progress_callback({"type": "tool_done", "step": step + 1, "tool": tc_item.name, "success": success, "duration": tool_duration})
                             tool_calls_log.append({
                                 "step": step + 1, "tool": tc_item.name, "arguments": tc_item.arguments,
                                 "success": success, "duration": tool_duration, "result_length": len(result_str),
                             })
-                            tool_results.append({"tc": tc_item, "result_str": result_str})
+                            tool_result_trace.append({
+                                "tool": tc_item.name,
+                                "arguments": tc_item.arguments,
+                                "success": success,
+                                "result": raw_result,
+                            })
+                            tool_results.append({"tc": tc_item, "raw_result": raw_result, "result_str": result_str})
 
                 # Append tool results to messages (ordered by original tool_calls order)
                 tc_order = {tc.id: i for i, tc in enumerate(response.tool_calls)}
@@ -536,15 +733,53 @@ class AgentExecutor:
 
             else:
                 # LLM returned text — this is the final answer
-                logger.info(f"Agent completed in {step + 1} steps "
-                          f"({time.time() - start_time:.1f}s, {total_tokens} tokens)")
+                logger.info(
+                    f"Agent completed in {step + 1} steps "
+                    f"({time.time() - start_time:.1f}s, {total_tokens} tokens)"
+                )
                 if progress_callback:
                     progress_callback({"type": "generating", "step": step + 1, "message": "正在生成最终分析..."})
 
                 final_content = response.content or ""
-                
+
                 if parse_dashboard:
+                    if response.provider == "error":
+                        fallback = self._build_screener_fallback(
+                            screener_query=screener_query,
+                            tool_result_trace=tool_result_trace,
+                            upstream_error=final_content,
+                        )
+                        if fallback is not None:
+                            return AgentResult(
+                                success=True,
+                                content=fallback["content"],
+                                dashboard=fallback["dashboard"],
+                                tool_calls_log=tool_calls_log,
+                                total_steps=step + 1,
+                                total_tokens=total_tokens,
+                                provider=provider_used,
+                                error=None,
+                            )
+                        return AgentResult(
+                            success=False,
+                            content="",
+                            dashboard=None,
+                            tool_calls_log=tool_calls_log,
+                            total_steps=step + 1,
+                            total_tokens=total_tokens,
+                            provider=provider_used,
+                            error=final_content,
+                        )
                     dashboard = self._parse_dashboard(final_content)
+                    if dashboard is None:
+                        fallback = self._build_screener_fallback(
+                            screener_query=screener_query,
+                            tool_result_trace=tool_result_trace,
+                            upstream_error=final_content if final_content.startswith("All LLM providers failed.") else None,
+                        )
+                        if fallback is not None:
+                            dashboard = fallback["dashboard"]
+                            final_content = fallback["content"]
                     return AgentResult(
                         success=dashboard is not None,
                         content=final_content,
@@ -590,6 +825,149 @@ class AgentExecutor:
             error=f"Agent exceeded max steps ({self.max_steps})",
         )
 
+    def _build_screener_fallback(
+        self,
+        screener_query: Optional[str],
+        tool_result_trace: List[Dict[str, Any]],
+        upstream_error: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Build a deterministic screener response from completed tool outputs."""
+        if not screener_query:
+            return None
+
+        screener_payload: Optional[Dict[str, Any]] = None
+        for item in tool_result_trace:
+            if item.get("tool") != "screen_stocks_full_scan":
+                continue
+            result = item.get("result")
+            if item.get("success") and isinstance(result, dict):
+                screener_payload = result
+
+        if screener_payload is None:
+            return None
+
+        raw_results = screener_payload.get("results") or []
+        normalized_results = []
+        for entry in raw_results:
+            if not isinstance(entry, dict):
+                continue
+            score = int(round(float(entry.get("signal_score") or 0)))
+            ma_alignment = "多头排列" if entry.get("ma_bullish") is True else "趋势待确认"
+            bias_ma5 = entry.get("bias_ma5")
+            volume_ratio = entry.get("volume_ratio")
+            market_cap_yi = entry.get("market_cap_yi")
+
+            reasons = []
+            if entry.get("ma_bullish") is True:
+                reasons.append("均线多头")
+            if bias_ma5 is not None:
+                reasons.append(f"MA5乖离 {bias_ma5}%")
+            if volume_ratio is not None:
+                reasons.append(f"量比 {volume_ratio}")
+            if not reasons:
+                reasons.append("符合实时预筛条件")
+
+            normalized_results.append(
+                {
+                    "code": entry.get("code"),
+                    "name": entry.get("name"),
+                    "price": entry.get("price"),
+                    "change_pct": entry.get("change_pct"),
+                    "signal": "买入" if score >= 80 else "关注" if score >= 65 else "观望",
+                    "signal_score": score,
+                    "reason": "，".join(reasons),
+                    "sector": entry.get("sector") or entry.get("industry") or "未分类",
+                    "pe_ratio": entry.get("pe_ratio"),
+                    "market_cap": f"{market_cap_yi}亿" if market_cap_yi is not None else None,
+                    "key_indicators": {
+                        "ma_alignment": ma_alignment,
+                        "bias_ma5": bias_ma5,
+                        "volume_ratio": volume_ratio,
+                        "profit_ratio": None,
+                    },
+                }
+            )
+
+        hot_sectors: List[str] = []
+        for result in normalized_results:
+            sector = result.get("sector")
+            if sector and sector not in hot_sectors:
+                hot_sectors.append(sector)
+            if len(hot_sectors) >= 3:
+                break
+
+        if normalized_results:
+            strategy_summary = (
+                f"已从全市场约 {screener_payload.get('total_market_stocks') or 0} 只股票中完成实时预筛，"
+                f"经过行情过滤与技术复筛后输出 {len(normalized_results)} 个候选。"
+            )
+            action_plan = "优先观察前 3 名候选，尽量等待回踩均线或放量确认，不追高，单票轻仓试错。"
+        else:
+            strategy_summary = "本次全市场预筛未发现满足当前条件的候选，说明趋势、量价或估值约束较严格。"
+            action_plan = "当前更适合等待条件放宽或市场趋势更明确后再发起选股。"
+
+        risk_warning = "当前结果为系统降级输出，请人工复核新闻、公告与盘中走势。"
+        if upstream_error:
+            risk_warning = f"{risk_warning} AI 报告生成阶段失败：{upstream_error}"
+        elif screener_payload.get("error"):
+            risk_warning = f"{risk_warning} 预筛阶段提示：{screener_payload.get('error')}"
+
+        dashboard = {
+            "query": screener_query,
+            "market_overview": {
+                "hot_sectors": hot_sectors,
+                "cold_sectors": [],
+                "market_style": "趋势筛选" if any(r["key_indicators"]["ma_alignment"] == "多头排列" for r in normalized_results) else "观望",
+            },
+            "results": normalized_results,
+            "strategy_summary": strategy_summary,
+            "risk_warning": risk_warning,
+            "action_plan": action_plan,
+        }
+
+        lines = [
+            "## AI 智能选股降级结果",
+            "",
+            "全市场预筛已经完成，但最终 AI 报告生成阶段异常，因此以下内容由系统基于已完成的筛选数据自动整理。",
+            "",
+            f"- 选股条件：{screener_query}",
+            f"- 全市场样本：{screener_payload.get('total_market_stocks') or 0}",
+            f"- 行情过滤后：{screener_payload.get('after_quote_filter') or 0}",
+            f"- 技术复筛数：{screener_payload.get('technical_scan_count') or 0}",
+            f"- 候选结果数：{len(normalized_results)}",
+            "",
+            "### 候选摘要",
+        ]
+
+        if normalized_results:
+            for idx, result in enumerate(normalized_results[:5], start=1):
+                lines.append(
+                    f"{idx}. {result['name']}({result['code']})：{result['signal']}，评分 {result['signal_score']}，"
+                    f"现价 {result['price']}，涨跌 {result['change_pct']}%，{result['reason']}"
+                )
+        else:
+            lines.append("当前没有满足条件的候选股票。")
+
+        lines.extend(
+            [
+                "",
+                "### 风险提示",
+                risk_warning,
+                "",
+                "### 操作建议",
+                action_plan,
+                "",
+                "```json",
+                json.dumps(dashboard, ensure_ascii=False, indent=2),
+                "```",
+            ]
+        )
+
+        return {
+            "content": "\n".join(lines),
+            "dashboard": dashboard,
+        }
+
     def _build_user_message(self, task: str, context: Optional[Dict[str, Any]] = None) -> str:
         """Build the initial user message."""
         parts = [task]
@@ -598,13 +976,13 @@ class AgentExecutor:
                 parts.append(f"\n股票代码: {context['stock_code']}")
             if context.get("report_type"):
                 parts.append(f"报告类型: {context['report_type']}")
-            
+
             # 注入已有的上下文数据，避免重复获取
             if context.get("realtime_quote"):
                 parts.append(f"\n[系统已获取的实时行情]\n{json.dumps(context['realtime_quote'], ensure_ascii=False)}")
             if context.get("chip_distribution"):
                 parts.append(f"\n[系统已获取的筹码分布]\n{json.dumps(context['chip_distribution'], ensure_ascii=False)}")
-                
+
         parts.append("\n请使用可用工具获取缺失的数据（如历史K线、新闻等），然后以决策仪表盘 JSON 格式输出分析结果。")
         return "\n".join(parts)
 

@@ -15,6 +15,13 @@ from pydantic import BaseModel
 
 from src.config import get_config
 
+from api.v1.schemas.agent import (
+    ScreenerHistoryDetailResponse,
+    ScreenerHistoryResponse,
+    ScreenerRequest,
+    ScreenerSaveRequest,
+)
+
 # Tool name -> Chinese display name mapping
 TOOL_DISPLAY_NAMES: Dict[str, str] = {
     "get_realtime_quote":         "获取实时行情",
@@ -30,6 +37,9 @@ TOOL_DISPLAY_NAMES: Dict[str, str] = {
     "analyze_pattern":            "识别K线形态",
     "get_market_indices":         "获取市场指数",
     "get_sector_rankings":        "分析行业板块",
+    "screen_stocks_by_conditions": "批量条件筛选",
+    "get_sector_top_stocks":      "板块成分股筛选",
+    "screen_stocks_full_scan":    "全市场智能筛选",
 }
 
 logger = logging.getLogger(__name__)
@@ -216,6 +226,158 @@ async def agent_chat_stream(request: ChatRequest):
                 except asyncio.TimeoutError:
                     yield "data: " + json.dumps({"type": "error", "message": "分析超时"}, ensure_ascii=False) + "\n\n"
                     break
+                yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+                if event.get("type") in ("done", "error"):
+                    break
+        finally:
+            try:
+                await asyncio.wait_for(fut, timeout=5.0)
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ============================================================
+# Screener History
+# ============================================================
+
+
+@router.get("/screener/history", response_model=ScreenerHistoryResponse)
+async def list_screener_history(limit: int = 20, offset: int = 0):
+    """获取选股历史记录列表"""
+    from src.storage import get_db
+    records = get_db().get_screener_history(limit=limit, offset=offset)
+    return ScreenerHistoryResponse(records=records)
+
+
+@router.get("/screener/history/{record_id}", response_model=ScreenerHistoryDetailResponse)
+async def get_screener_history_detail(record_id: int):
+    """获取选股历史详情"""
+    from src.storage import get_db
+    record = get_db().get_screener_detail(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    return ScreenerHistoryDetailResponse(**record)
+
+
+@router.post("/screener/history")
+async def save_screener_history(request: ScreenerSaveRequest):
+    """保存选股结果"""
+    from src.storage import get_db
+    import json as _json
+
+    payload = {
+        "dashboard": request.dashboard,
+        "results": request.results,
+        "report_markdown": request.report_markdown,
+        "status": request.status,
+        "provider": request.provider,
+        "error_message": request.error_message,
+    }
+    if any(value is not None for value in payload.values()):
+        results_json = _json.dumps(payload, ensure_ascii=False)
+    else:
+        results_json = "[]"
+    conditions_json = _json.dumps(request.conditions, ensure_ascii=False) if request.conditions else None
+
+    record_id = get_db().save_screener_result(
+        query=request.query,
+        results_json=results_json,
+        result_count=request.result_count,
+        strategy_summary=request.strategy_summary,
+        risk_warning=request.risk_warning,
+        conditions_json=conditions_json,
+        total_steps=request.total_steps,
+        total_tokens=request.total_tokens,
+    )
+    return {"id": record_id}
+
+
+@router.delete("/screener/history/{record_id}")
+async def delete_screener_history(record_id: int):
+    """删除选股历史记录"""
+    from src.storage import get_db
+    deleted = get_db().delete_screener_result(record_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Record not found")
+    return {"deleted": True}
+
+
+# ============================================================
+# Stock Screener
+# ============================================================
+
+
+@router.post("/screener/stream")
+async def agent_screener_stream(request: ScreenerRequest):
+    """
+    AI-powered stock screening via SSE stream.
+
+    Accepts natural language screening criteria, uses the LLM agent to
+    search and filter stocks, and streams progress events + final results.
+    """
+    config = get_config()
+    if not config.agent_mode:
+        raise HTTPException(status_code=400, detail="Agent mode is not enabled")
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def progress_callback(event: dict):
+        if event.get("type") in ("tool_start", "tool_done"):
+            tool = event.get("tool", "")
+            event["display_name"] = TOOL_DISPLAY_NAMES.get(tool, tool)
+        asyncio.run_coroutine_threadsafe(queue.put(event), loop)
+
+    def run_sync():
+        try:
+            from src.agent.factory import build_screener_executor
+            executor = build_screener_executor(config, skills=request.skills)
+            result = executor.screener(
+                query=request.query,
+                progress_callback=progress_callback,
+            )
+            asyncio.run_coroutine_threadsafe(
+                queue.put({
+                    "type": "done",
+                    "success": result.success,
+                    "content": result.content,
+                    "dashboard": result.dashboard,
+                    "error": result.error,
+                    "provider": result.provider,
+                    "total_steps": result.total_steps,
+                    "total_tokens": result.total_tokens,
+                }),
+                loop,
+            )
+        except Exception as exc:
+            logger.error(f"Screener stream error: {exc}")
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"type": "error", "message": str(exc)}),
+                loop,
+            )
+
+    _HEARTBEAT_INTERVAL = 15  # seconds between heartbeat events
+
+    async def event_generator():
+        fut = loop.run_in_executor(None, run_sync)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_INTERVAL)
+                except asyncio.TimeoutError:
+                    # Send heartbeat to keep the connection alive
+                    yield "data: " + json.dumps({"type": "heartbeat"}, ensure_ascii=False) + "\n\n"
+                    continue
                 yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
                 if event.get("type") in ("done", "error"):
                     break

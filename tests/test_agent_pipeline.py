@@ -234,6 +234,58 @@ class TestPipelineSkillRegistration(unittest.TestCase):
             self.assertEqual(s.source, "builtin")
 
 
+class TestScreenerExecutorFactory(unittest.TestCase):
+    """Test screener-specific executor wiring."""
+
+    def test_build_screener_executor_uses_screener_registry_and_no_default_skills(self):
+        """Screener executor should avoid generic default skills unless explicitly requested."""
+        from src.agent.factory import build_screener_executor
+
+        mock_cfg = MagicMock()
+        mock_cfg.agent_max_steps = 10
+        mock_registry = MagicMock()
+        mock_skill_manager = MagicMock()
+        mock_skill_manager.get_skill_instructions.return_value = "unused"
+
+        with patch("src.agent.factory.get_screener_tool_registry", return_value=mock_registry), \
+             patch("src.agent.factory.get_skill_manager", return_value=mock_skill_manager), \
+             patch("src.agent.llm_adapter.LLMToolAdapter") as mock_adapter_cls, \
+             patch("src.agent.executor.AgentExecutor") as mock_executor_cls:
+            build_screener_executor(config=mock_cfg)
+
+        mock_skill_manager.activate.assert_not_called()
+        mock_executor_cls.assert_called_once_with(
+            tool_registry=mock_registry,
+            llm_adapter=mock_adapter_cls.return_value,
+            skill_instructions="",
+            max_steps=6,
+        )
+
+    def test_build_screener_executor_keeps_explicit_skills(self):
+        """Screener executor should still pass through explicitly selected skills."""
+        from src.agent.factory import build_screener_executor
+
+        mock_cfg = MagicMock()
+        mock_cfg.agent_max_steps = 5
+        mock_registry = MagicMock()
+        mock_skill_manager = MagicMock()
+        mock_skill_manager.get_skill_instructions.return_value = "筛选技能"
+
+        with patch("src.agent.factory.get_screener_tool_registry", return_value=mock_registry), \
+             patch("src.agent.factory.get_skill_manager", return_value=mock_skill_manager), \
+             patch("src.agent.llm_adapter.LLMToolAdapter") as mock_adapter_cls, \
+             patch("src.agent.executor.AgentExecutor") as mock_executor_cls:
+            build_screener_executor(config=mock_cfg, skills=["dragon_head"])
+
+        mock_skill_manager.activate.assert_called_once_with(["dragon_head"])
+        mock_executor_cls.assert_called_once_with(
+            tool_registry=mock_registry,
+            llm_adapter=mock_adapter_cls.return_value,
+            skill_instructions="筛选技能",
+            max_steps=5,
+        )
+
+
 # ============================================================
 # Pipeline dual-path routing
 # ============================================================

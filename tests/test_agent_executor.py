@@ -16,7 +16,7 @@ import unittest
 import sys
 import os
 from dataclasses import dataclass
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -39,6 +39,40 @@ def _make_registry_with_echo():
             ToolParameter(name="message", type="string", description="Message to echo"),
         ],
         handler=lambda message: {"echo": message},
+    )
+    registry.register(tool)
+    return registry
+
+
+def _make_registry_with_screener():
+    """Create a registry with a minimal screener tool."""
+    registry = ToolRegistry()
+    tool = ToolDefinition(
+        name="screen_stocks_full_scan",
+        description="Returns deterministic screener data",
+        parameters=[
+            ToolParameter(name="conditions", type="string", description="Conditions JSON"),
+        ],
+        handler=lambda conditions: {
+            "total_market_stocks": 5000,
+            "after_quote_filter": 18,
+            "technical_scan_count": 18,
+            "results": [
+                {
+                    "code": "600519",
+                    "name": "贵州茅台",
+                    "sector": "白酒",
+                    "price": 1457.19,
+                    "change_pct": 2.62,
+                    "volume_ratio": 1.8,
+                    "pe_ratio": 28.3,
+                    "market_cap_yi": 18300.0,
+                    "ma_bullish": True,
+                    "bias_ma5": 1.2,
+                    "signal_score": 88,
+                }
+            ],
+        },
     )
     registry.register(tool)
     return registry
@@ -252,6 +286,58 @@ class TestAgentExecutor(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertFalse(result.tool_calls_log[0]["success"])
+
+    def test_screener_surfaces_provider_error_when_no_fallback_data(self):
+        """Screener should preserve the real provider error instead of a parse failure."""
+        registry = _make_registry_with_echo()
+        adapter = _make_mock_adapter()
+        adapter.call_with_tools.return_value = LLMResponse(
+            content="All LLM providers failed. Last error: 上游模型网关超时（504 Gateway Time-out）。",
+            tool_calls=[],
+            usage={"total_tokens": 20},
+            provider="error",
+        )
+
+        executor = AgentExecutor(registry, adapter, max_steps=3)
+        result = executor.screener("帮我找多头趋势股")
+
+        self.assertFalse(result.success)
+        self.assertIn("504", result.error)
+        self.assertNotIn("parse dashboard", result.error.lower())
+
+    def test_screener_builds_fallback_dashboard_after_provider_timeout(self):
+        """Screener should return downgraded structured results when scan data already exists."""
+        registry = _make_registry_with_screener()
+        adapter = _make_mock_adapter()
+
+        step1 = LLMResponse(
+            content="先做全市场预筛。",
+            tool_calls=[
+                ToolCall(
+                    id="screen_1",
+                    name="screen_stocks_full_scan",
+                    arguments={"conditions": json.dumps({"ma_bullish": True}, ensure_ascii=False)},
+                ),
+            ],
+            usage={"total_tokens": 50},
+            provider="openai",
+        )
+        step2 = LLMResponse(
+            content="All LLM providers failed. Last error: 上游模型网关超时（504 Gateway Time-out）。",
+            tool_calls=[],
+            usage={"total_tokens": 20},
+            provider="error",
+        )
+        adapter.call_with_tools.side_effect = [step1, step2]
+
+        executor = AgentExecutor(registry, adapter, max_steps=3)
+        result = executor.screener("帮我找多头趋势股")
+
+        self.assertTrue(result.success)
+        self.assertIsNotNone(result.dashboard)
+        self.assertEqual(result.dashboard["query"], "帮我找多头趋势股")
+        self.assertEqual(result.dashboard["results"][0]["code"], "600519")
+        self.assertIn("降级结果", result.content)
 
 
 # ============================================================
